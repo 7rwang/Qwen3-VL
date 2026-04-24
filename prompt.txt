@@ -1,0 +1,17 @@
+Locate the movable lever/grip part of the door handle that a robot gripper can directly operate. Exclude the fixed base, mounting plate, escutcheon, backplate, door surface, and any surrounding structure. Output JSON only.
+
+Locate only the movable pull/grip part of the drawer handle that a robot gripper can directly grasp. Exclude the fixed mounts, screws, handle base, drawer front, and any surrounding structure. Output JSON only.
+
+Locate only the movable handle part of the window handle that can be directly turned or grasped by a robot gripper. Exclude the fixed base, mounting plate, window frame, and any surrounding structure. Output JSON only.
+
+Locate only the left remote control body that a robot gripper can directly pick up. Exclude the table, background, shadows, black masked regions, and the right remote. Output JSON only.
+
+Locate only the right remote control body that a robot gripper can directly pick up. Exclude the table, background, shadows, black masked regions, and the left remote. Output JSON only.
+
+Locate only the pressable button or rocker part of the light switch that a robot finger or gripper can directly operate. Exclude the wall plate, switch frame, screws, surrounding wall, and any non-pressable base region. Output JSON only.
+
+Locate only the pressable or toggleable switch part of the lamp switch that can be directly operated. Exclude the lamp body, cable, housing, base, surrounding surface, and any non-operable support structure. Output JSON only.
+
+Locate only the graspable plug head of the power plug that a robot gripper can directly pull or insert. Exclude the cable, socket plate, wall, surrounding surface, and any background region. Output JSON only.
+
+Locate only the rotatable control knob or operable turning head of the thermostatic radiator valve that a robot gripper can directly rotate. Exclude the pipe, radiator body, fixed base, wall, and any surrounding structure. Output JSON only.
