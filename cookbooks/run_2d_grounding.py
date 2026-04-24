@@ -344,14 +344,33 @@ def resolve_scene_json_paths(scene_json: str | None, scene_json_dir: str | None,
 
 def resolve_scene_image_refs(data_root: str, scene_id: str) -> list[str]:
     root = Path(data_root).expanduser().resolve()
-    candidate_dirs = [
-        root / f"hires_wide_{scene_id}",
-        root / "data" / scene_id / "hires_wide",
-        root / "data" / scene_id,
-        root / scene_id,
-    ]
+    candidate_dirs: list[Path] = []
+    scene_root = root / scene_id
+    if scene_root.exists() and scene_root.is_dir():
+        sequence_dirs = sorted(
+            path for path in scene_root.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        )
+        if sequence_dirs:
+            candidate_dirs.append(sequence_dirs[0] / "hires_wide")
+            candidate_dirs.append(sequence_dirs[0])
+        candidate_dirs.append(scene_root / "hires_wide")
+        candidate_dirs.append(scene_root)
+    candidate_dirs.extend(
+        [
+            root / f"hires_wide_{scene_id}",
+            root / "data" / scene_id / "hires_wide",
+            root / "data" / scene_id,
+            root / scene_id,
+        ]
+    )
     image_paths: list[Path] = []
+    seen_dirs: set[Path] = set()
     for candidate in candidate_dirs:
+        candidate = candidate.resolve()
+        if candidate in seen_dirs:
+            continue
+        seen_dirs.add(candidate)
         if candidate.exists() and candidate.is_dir():
             image_paths = sorted(
                 path for path in candidate.iterdir()
