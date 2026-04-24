@@ -230,9 +230,10 @@ def prompt_from_affordance_category(category: str) -> dict[str, str]:
     prompt_map = {
         "door handle": (
             "door_handle",
-            "Locate only the movable lever or grip part of a true door handle mounted on a door. "
-            "Exclude the fixed base, mounting plate, escutcheon, screws, door surface, and any handle-like object not attached to a door. "
-            "Only box the minimum directly operable area. Return JSON only as a list of objects with bbox_2d fields and no label field."
+            "Locate two separate tight bounding boxes for a true door handle mounted on a door and output JSON only: "
+            "(1) the fixed base or mounting plate attached to the door, exclude the movable lever; "
+            "(2) the movable lever or grip part used to open the door, exclude the base, door surface, and surrounding objects. "
+            "Return JSON only as a list of objects with bbox_2d fields and no label field."
         ),
         "drawer handle": (
             "drawer_handle",
@@ -266,9 +267,10 @@ def prompt_from_affordance_category(category: str) -> dict[str, str]:
         ),
         "lamp switch": (
             "lamp_switch",
-            "Locate only the pressable or toggleable part of each lamp switch that can be directly operated. "
-            "Exclude the lamp body, cable, housing, base, and surrounding support structure. "
-            "Only box the minimum directly operable area. Return JSON only as a list of objects with bbox_2d fields and no label field."
+            "Locate two separate tight bounding boxes for the lamp switch and output JSON only: "
+            "(1) the central pressable button located in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
+            "(2) the full switch panel or plate, including the button, exclude the surrounding wall and background. "
+            "Return JSON only as a list of objects with bbox_2d fields and no label field."
         ),
         "power plug": (
             "power_plug",
