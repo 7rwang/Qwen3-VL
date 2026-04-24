@@ -733,15 +733,12 @@ def process_batch(client: OpenAI, args: argparse.Namespace) -> None:
                 mode=args.mode,
                 output_image=output_image,
             )
-            objects: dict[str, list[list[int]]] = {}
+            objects: dict[str, list[dict[str, Any]]] = {}
             for result in payload["results"]:
                 items = try_parse_detection_items(result["response"])
                 prompt_key = result["prompt_key"]
                 objects.setdefault(prompt_key, [])
-                for item in items:
-                    bbox = item.get("bbox_2d")
-                    if isinstance(bbox, list) and len(bbox) == 4:
-                        objects[prompt_key].append(bbox)
+                objects[prompt_key].extend(build_detection_entries(prompt_key, items))
             summary_frames.append(
                 {
                     "frame_index": frame_index,
@@ -794,6 +791,20 @@ def dedupe_prompt_items(prompt_items: list[dict[str, str]]) -> list[dict[str, st
         seen.add(key)
         deduped.append(item)
     return deduped
+
+
+def build_detection_entries(prompt_key: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    bboxes = [
+        item.get("bbox_2d")
+        for item in items
+        if isinstance(item.get("bbox_2d"), list) and len(item.get("bbox_2d")) == 4
+    ]
+    if prompt_key in {"door_handle", "lamp_switch"} and len(bboxes) == 2:
+        return [
+            {"bbox": bboxes[0], "label": 0},
+            {"bbox": bboxes[1], "label": 1},
+        ]
+    return [{"bbox": bbox, "label": 1} for bbox in bboxes]
 
 
 def build_scene_frame_summary(
@@ -864,15 +875,12 @@ def build_scene_frame_summary(
                 mode=args.mode,
                 output_image=output_image,
             )
-            objects: dict[str, list[list[int]]] = {}
+            objects: dict[str, list[dict[str, Any]]] = {}
             for result in payload["results"]:
                 items = try_parse_detection_items(result["response"])
                 prompt_key = result["prompt_key"]
                 objects.setdefault(prompt_key, [])
-                for item in items:
-                    bbox = item.get("bbox_2d")
-                    if isinstance(bbox, list) and len(bbox) == 4:
-                        objects[prompt_key].append(bbox)
+                objects[prompt_key].extend(build_detection_entries(prompt_key, items))
             frame_summary["objects"] = objects
         except Exception as exc:
             frame_summary["error"] = str(exc)
