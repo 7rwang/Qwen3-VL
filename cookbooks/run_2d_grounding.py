@@ -49,6 +49,8 @@ BASE_URLS = {
     "virginia": "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
 }
 
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -57,6 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", help="Local image path or http(s) URL.")
     parser.add_argument("--image-dir", help="Directory containing local images to process in batch.")
     parser.add_argument("--data-root", help="Dataset root for scene-based processing.")
+    parser.add_argument("--mask-root", help="Optional root containing scene/frame mask folders for mask-guided refinement.")
     parser.add_argument("--scene-json", help="Path to one scene annotation JSON, e.g. 421254.json.")
     parser.add_argument("--scene-json-dir", help="Directory containing many scene annotation JSON files.")
     parser.add_argument("--scene-id", help="Optional scene id to process one scene from --scene-json-dir.")
@@ -376,13 +379,121 @@ def resolve_scene_image_refs(data_root: str, scene_id: str) -> list[str]:
         if candidate.exists() and candidate.is_dir():
             image_paths = sorted(
                 path for path in candidate.iterdir()
-                if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+                if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
             )
             if image_paths:
                 break
     if not image_paths:
         raise SystemExit(f"Could not find scene images for scene id {scene_id} under data root {data_root}")
     return [str(path.resolve()) for path in image_paths]
+
+
+def normalize_token(text: str) -> str:
+    lowered = text.strip().lower().replace("_", " ")
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered
+
+
+def category_aliases(category: str) -> set[str]:
+    normalized = normalize_token(category)
+    alias_map = {
+        "door handle": {"door handle", "door_handle", "handle", "knob"},
+        "drawer handle": {"drawer handle", "drawer_handle", "handle", "pull", "grip"},
+        "window handle": {"window handle", "window_handle", "handle"},
+        "remote control": {"remote control", "remote_control", "remote"},
+        "switch": {"switch", "button", "power switch", "power_switch"},
+        "light switch": {"light switch", "light_switch", "switch", "button", "power switch", "power_switch"},
+        "lamp switch": {"lamp switch", "lamp_switch", "switch", "button", "power switch", "power_switch"},
+        "power plug": {"power plug", "power_plug", "plug"},
+        "thermostatic radiator valve": {
+            "thermostatic radiator valve",
+            "thermostatic_radiator_valve",
+            "radiator valve",
+            "valve",
+            "dial",
+            "knob",
+        },
+    }
+    return alias_map.get(normalized, {normalized, normalized.replace(" ", "_")})
+
+
+def parse_mask_filename(mask_path: Path) -> dict[str, Any] | None:
+    stem = mask_path.stem
+    match = re.match(r"^(INT|CTX)__(.+?)__(\d+)__area(\d+)$", stem)
+    if not match:
+        return None
+    prefix, instance_name, instance_index, area = match.groups()
+    return {
+        "prefix": prefix,
+        "instance_name": instance_name,
+        "instance_index": int(instance_index),
+        "area": int(area),
+    }
+
+
+def compute_mask_bbox(mask_path: Path) -> list[int] | None:
+    image = Image.open(mask_path).convert("RGBA")
+    alpha_bbox = image.getchannel("A").getbbox()
+    if alpha_bbox:
+        left, top, right, bottom = alpha_bbox
+        return [left, top, right, bottom]
+    rgb = image.convert("RGB")
+    bbox = rgb.point(lambda value: 255 if value > 0 else 0).getbbox()
+    if bbox:
+        left, top, right, bottom = bbox
+        return [left, top, right, bottom]
+    return None
+
+
+def resolve_frame_mask_dir(mask_root: str, scene_id: str, frame_index: int) -> Path | None:
+    root = Path(mask_root).expanduser().resolve()
+    candidates = [
+        root / scene_id / str(frame_index),
+        root / scene_id / f"{frame_index:04d}",
+        root / "masks" / str(frame_index),
+        root / "masks" / f"{frame_index:04d}",
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+    return None
+
+
+def collect_mask_candidates(mask_root: str, scene_id: str, frame_index: int, categories: list[str]) -> list[dict[str, Any]]:
+    frame_dir = resolve_frame_mask_dir(mask_root, scene_id, frame_index)
+    if frame_dir is None:
+        return []
+    category_alias_map = {category: category_aliases(category) for category in categories}
+    candidates: list[dict[str, Any]] = []
+    serial = 1
+    for mask_path in sorted(path for path in frame_dir.iterdir() if path.is_file() and path.suffix.lower() == ".png"):
+        parsed = parse_mask_filename(mask_path)
+        if not parsed or parsed["prefix"] != "INT":
+            continue
+        normalized_instance = normalize_token(parsed["instance_name"])
+        matched_category = None
+        for category, aliases in category_alias_map.items():
+            if normalized_instance in {normalize_token(alias) for alias in aliases}:
+                matched_category = category
+                break
+        if matched_category is None:
+            continue
+        bbox = compute_mask_bbox(mask_path)
+        if bbox is None:
+            continue
+        candidates.append(
+            {
+                "candidate_id": f"C{serial}",
+                "category": matched_category,
+                "prompt_key": affordance_key_from_category(matched_category),
+                "instance_name": parsed["instance_name"],
+                "instance_index": parsed["instance_index"],
+                "mask_path": str(mask_path),
+                "coarse_bbox": bbox,
+            }
+        )
+        serial += 1
+    return candidates
 
 
 def output_stem(image_ref: str) -> str:
@@ -401,17 +512,18 @@ def build_client(api_key: str, region: str) -> OpenAI:
     return OpenAI(api_key=api_key, base_url=BASE_URLS[region])
 
 
-def infer(
+def infer_image_bytes(
     client: OpenAI,
-    image_ref: str,
+    image_bytes: bytes,
     prompt: str,
     model: str,
     min_pixels: int,
     max_pixels: int,
+    mime_type: str = "image/jpeg",
 ) -> str:
     import base64
 
-    base64_image = base64.b64encode(load_image_bytes(image_ref)).decode("utf-8")
+    base64_image = base64.b64encode(image_bytes).decode("utf-8")
     messages = [
         {
             "role": "system",
@@ -427,7 +539,7 @@ def infer(
             "content": [
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                    "image_url": {"url": f"data:{mime_type};base64,{base64_image}"},
                     "min_pixels": min_pixels,
                     "max_pixels": max_pixels,
                 },
@@ -437,6 +549,32 @@ def infer(
     ]
     completion = client.chat.completions.create(model=model, messages=messages)
     return sanitize_response_text(completion.choices[0].message.content or "")
+
+
+def infer(
+    client: OpenAI,
+    image_ref: str,
+    prompt: str,
+    model: str,
+    min_pixels: int,
+    max_pixels: int,
+) -> str:
+    mime_type = "image/jpeg"
+    if not is_url(image_ref):
+        suffix = Path(image_ref).suffix.lower()
+        if suffix == ".png":
+            mime_type = "image/png"
+        elif suffix == ".webp":
+            mime_type = "image/webp"
+    return infer_image_bytes(
+        client=client,
+        image_bytes=load_image_bytes(image_ref),
+        prompt=prompt,
+        model=model,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        mime_type=mime_type,
+    )
 
 
 def strip_json_fence(text: str) -> str:
@@ -807,6 +945,85 @@ def build_detection_entries(prompt_key: str, items: list[dict[str, Any]]) -> lis
     return [{"bbox": bbox, "label": 1} for bbox in bboxes]
 
 
+def draw_mask_candidates(image_ref: str, candidates: list[dict[str, Any]]) -> Image.Image:
+    image = load_pil_image(image_ref)
+    draw = ImageDraw.Draw(image)
+    font = get_font()
+    for idx, candidate in enumerate(candidates):
+        color = COLORS[idx % len(COLORS)]
+        x1, y1, x2, y2 = candidate["coarse_bbox"]
+        draw.rectangle(((x1, y1), (x2, y2)), outline=color, width=3)
+        label = f"{candidate['candidate_id']}:{candidate['instance_name']}"
+        draw.text((x1 + 4, y1 + 4), label, fill=color, font=font)
+    return image
+
+
+def build_mask_refine_prompt(candidates: list[dict[str, Any]]) -> str:
+    candidate_lines = []
+    for candidate in candidates:
+        x1, y1, x2, y2 = candidate["coarse_bbox"]
+        candidate_lines.append(
+            f"- {candidate['candidate_id']}: instance_name={candidate['instance_name']}, "
+            f"category={candidate['category']}, coarse_bbox=[{x1}, {y1}, {x2}, {y2}]"
+        )
+    return (
+        "The image contains pre-drawn candidate boxes. Each box label has the form candidate_id:instance_name. "
+        "Refine each candidate independently and do not skip any candidate. "
+        "For every candidate, return at least one tight bbox for the object inside that candidate box. "
+        "All returned boxes must stay within or very near the corresponding coarse candidate box and must tightly cover the visible object only.\n"
+        "Special rules:\n"
+        "- For category 'door handle', return exactly two boxes for that candidate: part_index 0 for the fixed base attached to the door, and part_index 1 for the movable lever/grip part.\n"
+        "- For category 'lamp switch', return exactly two boxes for that candidate: part_index 0 for the full switch panel/plate, and part_index 1 for the central pressable button.\n"
+        "- For all other categories, return exactly one box with part_index 1.\n"
+        "Return JSON only as a list of objects with fields: candidate_id, instance_name, category, part_index, bbox_2d.\n"
+        "Candidates:\n"
+        + "\n".join(candidate_lines)
+    )
+
+
+def parse_mask_refine_response(
+    response_text: str,
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    candidate_map = {candidate["candidate_id"]: candidate for candidate in candidates}
+    items = try_parse_detection_items(response_text)
+    objects: dict[str, list[dict[str, Any]]] = {}
+    seen_candidate_parts: set[tuple[str, int]] = set()
+    for item in items:
+        candidate_id = str(item.get("candidate_id", "")).strip()
+        if candidate_id not in candidate_map:
+            continue
+        bbox = item.get("bbox_2d")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        candidate = candidate_map[candidate_id]
+        prompt_key = candidate["prompt_key"]
+        part_index = item.get("part_index", 1)
+        try:
+            part_index = int(part_index)
+        except Exception:
+            part_index = 1
+        label = 1 if part_index == 1 else 0
+        objects.setdefault(prompt_key, []).append(
+            {
+                "bbox": bbox,
+                "label": label,
+                "candidate_id": candidate_id,
+                "instance_name": candidate["instance_name"],
+                "category": candidate["category"],
+                "coarse_bbox": candidate["coarse_bbox"],
+            }
+        )
+        seen_candidate_parts.add((candidate_id, part_index))
+
+    missing_candidates: list[str] = []
+    for candidate in candidates:
+        expected_parts = [0, 1] if candidate["prompt_key"] in {"door_handle", "lamp_switch"} else [1]
+        if any((candidate["candidate_id"], part_index) not in seen_candidate_parts for part_index in expected_parts):
+            missing_candidates.append(candidate["candidate_id"])
+    return objects, missing_candidates
+
+
 def build_scene_frame_summary(
     client: OpenAI,
     args: argparse.Namespace,
@@ -865,23 +1082,66 @@ def build_scene_frame_summary(
         try:
             if tqdm is not None:
                 iterator.set_postfix_str(f"frame={frame_index}")
-            payload = process_one_with_prompts(
-                client=client,
-                image_ref=image_ref,
-                prompts=prompt_items,
-                model=args.model,
-                min_pixels=args.min_pixels,
-                max_pixels=args.max_pixels,
-                mode=args.mode,
-                output_image=output_image,
-            )
-            objects: dict[str, list[dict[str, Any]]] = {}
-            for result in payload["results"]:
-                items = try_parse_detection_items(result["response"])
-                prompt_key = result["prompt_key"]
-                objects.setdefault(prompt_key, [])
-                objects[prompt_key].extend(build_detection_entries(prompt_key, items))
-            frame_summary["objects"] = objects
+            if args.mask_root:
+                candidates = collect_mask_candidates(args.mask_root, scene_id, frame_index, categories)
+                frame_summary["mask_candidates"] = candidates
+                if not candidates:
+                    frame_summary["processed"] = False
+                    frame_summary["error"] = f"No INT mask candidates found under mask root for scene {scene_id} frame {frame_index}"
+                    failures.append((frame_index, frame_summary["error"]))
+                    summary_frames.append(frame_summary)
+                    continue
+                annotated_image = draw_mask_candidates(image_ref, candidates)
+                buffer = BytesIO()
+                annotated_image.save(buffer, format="PNG")
+                prompt = build_mask_refine_prompt(candidates)
+                response_text = infer_image_bytes(
+                    client=client,
+                    image_bytes=buffer.getvalue(),
+                    prompt=prompt,
+                    model=args.model,
+                    min_pixels=args.min_pixels,
+                    max_pixels=args.max_pixels,
+                )
+                print(f"=== {image_ref} ===")
+                print(response_text)
+                objects, missing_candidates = parse_mask_refine_response(response_text, candidates)
+                frame_summary["objects"] = objects
+                if missing_candidates:
+                    frame_summary["missing_candidates"] = missing_candidates
+                if output_image:
+                    vis_image = annotated_image.copy()
+                    vis_payload = []
+                    for object_key, entries in objects.items():
+                        for entry in entries:
+                            vis_payload.append(
+                                {
+                                    "bbox_2d": entry["bbox"],
+                                    "label": f"{object_key}:{entry['label']}",
+                                }
+                            )
+                    vis_image = render_bbox(vis_image, vis_payload)
+                    Path(output_image).parent.mkdir(parents=True, exist_ok=True)
+                    vis_image.save(output_image)
+                    print(f"Saved visualization to {output_image}")
+            else:
+                payload = process_one_with_prompts(
+                    client=client,
+                    image_ref=image_ref,
+                    prompts=prompt_items,
+                    model=args.model,
+                    min_pixels=args.min_pixels,
+                    max_pixels=args.max_pixels,
+                    mode=args.mode,
+                    output_image=output_image,
+                )
+                objects: dict[str, list[dict[str, Any]]] = {}
+                for result in payload["results"]:
+                    items = try_parse_detection_items(result["response"])
+                    prompt_key = result["prompt_key"]
+                    objects.setdefault(prompt_key, [])
+                    objects[prompt_key].extend(build_detection_entries(prompt_key, items))
+                frame_summary["objects"] = objects
         except Exception as exc:
             frame_summary["error"] = str(exc)
             failures.append((frame_index, str(exc)))
