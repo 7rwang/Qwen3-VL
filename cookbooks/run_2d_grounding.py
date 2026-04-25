@@ -233,21 +233,64 @@ def affordance_key_from_category(category: str) -> str:
     return mapping.get(normalized, slugify_prompt_key(normalized))
 
 
+SPECIAL_PART_DEFINITIONS = {
+    "door handle": {
+        "part_0": "the fixed base or mounting plate attached to the door",
+        "part_1": "the movable lever or grip part used to open the door",
+    },
+    "drawer handle": {
+        "part_0": "the fixed mount or base attached to the drawer front",
+        "part_1": "the movable pull or grip part used to open the drawer",
+    },
+    "window handle": {
+        "part_0": "the fixed base attached to the window frame",
+        "part_1": "the movable handle part used to turn or pull the window handle",
+    },
+    "switch": {
+        "part_0": "the entire switch panel or plate",
+        "part_1": "the central pressable button, rocker, or toggle",
+    },
+    "light switch": {
+        "part_0": "the entire switch panel or plate",
+        "part_1": "the central pressable button, rocker, or toggle",
+    },
+    "lamp switch": {
+        "part_0": "the entire switch panel or plate",
+        "part_1": "the central pressable button, rocker, or toggle",
+    },
+    "power plug": {
+        "part_0": "the plug body or housing outside the graspable tip",
+        "part_1": "the graspable plug head used to pull or insert the plug",
+    },
+    "thermostatic radiator valve": {
+        "part_0": "the fixed valve body or attached housing",
+        "part_1": "the rotatable control knob or turning head",
+    },
+}
+
+
 def prompt_from_affordance_category(category: str) -> dict[str, str]:
     normalized = category.strip().lower()
     prompt_key = affordance_key_from_category(category)
+    special_parts = SPECIAL_PART_DEFINITIONS.get(normalized)
+    if special_parts:
+        part_definition_text = (
+            f"part_index 0: {special_parts['part_0']}. "
+            f"part_index 1: {special_parts['part_1']}. "
+        )
+    else:
+        part_definition_text = (
+            "part_index 1: the minimum directly operable region. "
+            "part_index 0: a connected non-core region of the same object outside that operable core, such as support, housing, mount, panel, stem, or body. "
+        )
     return {
         "key": prompt_key,
         "text": (
             f"Locate every visible instance of affordance category '{category}' and output JSON only. "
             "For each instance, return exactly two tight boxes. "
-            "part_index 1: the minimum directly operable region. "
-            "part_index 0: a connected non-core region of the same object outside that operable core, such as support, housing, mount, panel, stem, or body. "
+            + part_definition_text +
             "Do not duplicate part_index 1 as part_index 0 when a distinct attached non-core region is visible. "
             "Keep both boxes on the same object instance and exclude unrelated objects, background, surfaces, black masked regions, and neighboring instances. "
-            "Examples: "
-            "for a door handle, part_index 0 is the fixed base or mounting plate attached to the door, and part_index 1 is the movable lever or grip part used to open the door; "
-            "for a lamp switch or light switch, part_index 0 is the entire switch panel or plate, and part_index 1 is the central pressable button or rocker in the middle of the panel. "
             "Return JSON only as a list of objects with fields bbox_2d and part_index."
         ),
     }
@@ -994,9 +1037,21 @@ def build_mask_refine_prompt(candidates: list[dict[str, Any]]) -> str:
     candidate_lines = []
     for candidate in candidates:
         x1, y1, x2, y2 = candidate["coarse_bbox"]
+        part_defs = SPECIAL_PART_DEFINITIONS.get(candidate["category"].strip().lower())
+        if part_defs:
+            part_text = (
+                f"part_index 0={part_defs['part_0']}; "
+                f"part_index 1={part_defs['part_1']}"
+            )
+        else:
+            part_text = (
+                "part_index 0=connected non-core region outside the operable core; "
+                "part_index 1=minimum directly operable region"
+            )
         candidate_lines.append(
             f"- {candidate['candidate_id']}: instance_name={candidate['instance_name']}, "
-            f"category={candidate['category']}, coarse_bbox=[{x1}, {y1}, {x2}, {y2}]"
+            f"category={candidate['category']}, coarse_bbox=[{x1}, {y1}, {x2}, {y2}], "
+            f"{part_text}"
         )
     return (
         "The image contains pre-drawn candidate boxes labeled candidate_id:instance_name. "
@@ -1009,8 +1064,6 @@ def build_mask_refine_prompt(candidates: list[dict[str, Any]]) -> str:
         "- part_index 1 is the minimum directly operable region.\n"
         "- part_index 0 is a connected non-core region of the same object outside that operable core.\n"
         "- part_index 0 must not duplicate part_index 1 when a distinct attached non-core region is visible.\n"
-        "- Example for door handle: part_index 0 is the fixed base or mounting plate, part_index 1 is the movable lever or grip.\n"
-        "- Example for lamp switch or light switch: part_index 0 is the entire switch panel or plate, part_index 1 is the central pressable button or rocker.\n"
         "Return JSON only as a list of objects with fields: candidate_id, instance_name, category, part_index, bbox_2d.\n"
         "Candidates:\n"
         + "\n".join(candidate_lines)
