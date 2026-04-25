@@ -245,6 +245,9 @@ def prompt_from_affordance_category(category: str) -> dict[str, str]:
             "part_index 0: a connected non-core region of the same object outside that operable core, such as support, housing, mount, panel, stem, or body. "
             "Do not duplicate part_index 1 as part_index 0 when a distinct attached non-core region is visible. "
             "Keep both boxes on the same object instance and exclude unrelated objects, background, surfaces, black masked regions, and neighboring instances. "
+            "Examples: "
+            "for a door handle, part_index 0 is the fixed base or mounting plate attached to the door, and part_index 1 is the movable lever or grip part used to open the door; "
+            "for a lamp switch or light switch, part_index 0 is the entire switch panel or plate, and part_index 1 is the central pressable button or rocker in the middle of the panel. "
             "Return JSON only as a list of objects with fields bbox_2d and part_index."
         ),
     }
@@ -1006,6 +1009,8 @@ def build_mask_refine_prompt(candidates: list[dict[str, Any]]) -> str:
         "- part_index 1 is the minimum directly operable region.\n"
         "- part_index 0 is a connected non-core region of the same object outside that operable core.\n"
         "- part_index 0 must not duplicate part_index 1 when a distinct attached non-core region is visible.\n"
+        "- Example for door handle: part_index 0 is the fixed base or mounting plate, part_index 1 is the movable lever or grip.\n"
+        "- Example for lamp switch or light switch: part_index 0 is the entire switch panel or plate, part_index 1 is the central pressable button or rocker.\n"
         "Return JSON only as a list of objects with fields: candidate_id, instance_name, category, part_index, bbox_2d.\n"
         "Candidates:\n"
         + "\n".join(candidate_lines)
