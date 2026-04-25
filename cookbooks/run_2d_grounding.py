@@ -113,6 +113,11 @@ def parse_args() -> argparse.Namespace:
         help="In batch mode, process every N-th image after sorting. Default: 1.",
     )
     parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Process frames in reverse order after sorting. In scene-json mode, stride is applied after reversing.",
+    )
+    parser.add_argument(
         "--min-pixels",
         type=int,
         default=64 * 32 * 32,
@@ -829,6 +834,8 @@ def try_parse_detection_items(response_text: str) -> list[dict[str, Any]]:
 
 def process_batch(client: OpenAI, args: argparse.Namespace) -> None:
     all_image_refs = iter_image_refs(args.image_dir, args.glob)
+    if args.reverse:
+        all_image_refs = list(reversed(all_image_refs))
     selected_indices = set(range(0, len(all_image_refs), args.stride))
     prompts = load_prompts(args.prompt, args.prompt_file)
     image_root = Path(args.output_image_dir) if args.output_image_dir else None
@@ -1033,6 +1040,8 @@ def build_scene_frame_summary(
 ) -> dict[str, Any]:
     frame_category_map = load_scene_annotation_map(scene_json_path)
     ordered_frame_indices = sorted(frame_category_map.keys())
+    if args.reverse:
+        ordered_frame_indices = list(reversed(ordered_frame_indices))
     selected_frame_indices = ordered_frame_indices[:: args.stride]
     scene_vis_root = Path(args.output_image_dir) / scene_id if args.output_image_dir else None
     if scene_vis_root:
@@ -1156,6 +1165,7 @@ def build_scene_frame_summary(
         "requested_frame_count": len(ordered_frame_indices),
         "processed_frame_count": len(selected_frame_indices),
         "stride": args.stride,
+        "reverse": args.reverse,
         "frames": summary_frames,
         "failures": [
             {"frame_index": frame_index, "error": error}
