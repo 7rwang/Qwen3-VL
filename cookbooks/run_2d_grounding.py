@@ -455,7 +455,7 @@ def compute_mask_bbox(mask_path: Path) -> list[int] | None:
 def resolve_frame_mask_dir(mask_root: str, scene_id: str, frame_index: int) -> Path | None:
     root = Path(mask_root).expanduser().resolve()
     candidates = [
-        root / scene_id / str(frame_index),
+        root / scene_id / "masks"/ str(frame_index),
         root / scene_id / f"{frame_index:04d}",
         root / "masks" / str(frame_index),
         root / "masks" / f"{frame_index:04d}",
