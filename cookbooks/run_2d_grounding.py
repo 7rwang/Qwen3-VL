@@ -263,15 +263,17 @@ def prompt_from_affordance_category(category: str) -> dict[str, str]:
         ),
         "switch": (
             "switch",
-            "Locate only the pressable button, rocker, or toggle part of each switch that can be directly operated. "
-            "Exclude the wall plate, frame, screws, surrounding wall, and any non-pressable base region. "
-            "Only box the minimum directly operable area. Return JSON only as a list of objects with bbox_2d fields and no label field."
+            "Locate two separate tight bounding boxes for the switch and output JSON only: "
+            "(1) the central pressable button or rocker located in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
+            "(2) the full switch panel or plate, including the button, exclude the surrounding wall and background. "
+            "Return JSON only as a list of objects with bbox_2d fields and no label field."
         ),
         "light switch": (
             "light_switch",
-            "Locate only the pressable button, rocker, or toggle part of each light switch that can be directly operated. "
-            "Exclude the wall plate, frame, screws, surrounding wall, and any non-pressable base region. "
-            "Only box the minimum directly operable area. Return JSON only as a list of objects with bbox_2d fields and no label field."
+            "Locate two separate tight bounding boxes for the light switch and output JSON only: "
+            "(1) the central pressable button or rocker located in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
+            "(2) the full switch panel or plate, including the button, exclude the surrounding wall and background. "
+            "Return JSON only as a list of objects with bbox_2d fields and no label field."
         ),
         "lamp switch": (
             "lamp_switch",
@@ -944,7 +946,7 @@ def build_detection_entries(prompt_key: str, items: list[dict[str, Any]]) -> lis
         for item in items
         if isinstance(item.get("bbox_2d"), list) and len(item.get("bbox_2d")) == 4
     ]
-    if prompt_key in {"door_handle", "lamp_switch"} and len(bboxes) == 2:
+    if prompt_key in {"door_handle", "switch", "light_switch", "lamp_switch"} and len(bboxes) == 2:
         return [
             {"bbox": bboxes[0], "label": 0},
             {"bbox": bboxes[1], "label": 1},
@@ -980,6 +982,7 @@ def build_mask_refine_prompt(candidates: list[dict[str, Any]]) -> str:
         "All returned boxes must stay within or very near the corresponding coarse candidate box and must tightly cover the visible object only.\n"
         "Special rules:\n"
         "- For category 'door handle', return exactly two boxes for that candidate: part_index 0 for the fixed base attached to the door, and part_index 1 for the movable lever/grip part.\n"
+        "- For category 'switch' or 'light switch', return exactly two boxes for that candidate: part_index 0 for the full switch panel/plate, and part_index 1 for the central pressable button or rocker.\n"
         "- For category 'lamp switch', return exactly two boxes for that candidate: part_index 0 for the full switch panel/plate, and part_index 1 for the central pressable button.\n"
         "- For all other categories, return exactly one box with part_index 1.\n"
         "Return JSON only as a list of objects with fields: candidate_id, instance_name, category, part_index, bbox_2d.\n"
@@ -1025,7 +1028,7 @@ def parse_mask_refine_response(
 
     missing_candidates: list[str] = []
     for candidate in candidates:
-        expected_parts = [0, 1] if candidate["prompt_key"] in {"door_handle", "lamp_switch"} else [1]
+        expected_parts = [0, 1] if candidate["prompt_key"] in {"door_handle", "switch", "light_switch", "lamp_switch"} else [1]
         if any((candidate["candidate_id"], part_index) not in seen_candidate_parts for part_index in expected_parts):
             missing_candidates.append(candidate["candidate_id"])
     return objects, missing_candidates
