@@ -1024,14 +1024,33 @@ def clamp_bbox_to_coarse_bbox(
     except Exception:
         return None
 
-    x1 = max(cx1, min(x1, cx2))
-    y1 = max(cy1, min(y1, cy2))
-    x2 = max(cx1, min(x2, cx2))
-    y2 = max(cy1, min(y2, cy2))
+    left, right = sorted((x1, x2))
+    top, bottom = sorted((y1, y2))
+    coarse_left, coarse_right = sorted((cx1, cx2))
+    coarse_top, coarse_bottom = sorted((cy1, cy2))
 
-    if x2 <= x1 or y2 <= y1:
+    if right <= left or bottom <= top:
         return None
-    return [x1, y1, x2, y2]
+
+    fully_inside = (
+        left >= coarse_left
+        and right <= coarse_right
+        and top >= coarse_top
+        and bottom <= coarse_bottom
+    )
+    if fully_inside:
+        return [left, top, right, bottom]
+
+    overlaps = not (
+        right <= coarse_left
+        or left >= coarse_right
+        or bottom <= coarse_top
+        or top >= coarse_bottom
+    )
+    if overlaps:
+        return [left, top, right, bottom]
+
+    return None
 
 
 def parse_mask_refine_response(
