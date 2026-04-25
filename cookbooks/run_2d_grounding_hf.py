@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=["auto", "bfloat16", "float16", "float32"], default="auto")
     parser.add_argument("--device-map", default="auto", help="Transformers device_map. Use auto for multi-GPU sharding.")
     parser.add_argument("--attn-implementation", default=None, help="Optional attention backend, e.g. flash_attention_2 or sdpa.")
-    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--trust-remote-code", action="store_true", default=True)
     parser.add_argument("--no-trust-remote-code", dest="trust_remote_code", action="store_false")
     args = parser.parse_args()

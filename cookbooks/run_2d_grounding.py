@@ -235,75 +235,17 @@ def affordance_key_from_category(category: str) -> str:
 
 def prompt_from_affordance_category(category: str) -> dict[str, str]:
     normalized = category.strip().lower()
-    prompt_map = {
-        "door handle": (
-            "door_handle",
-            "Locate two separate tight bounding boxes for a true door handle mounted on a door and output JSON only: "
-            "(1) the fixed base or mounting plate attached to the door, exclude the movable lever; "
-            "(2) the movable lever or grip part used to open the door, exclude the base, door surface, and surrounding objects. "
-            "Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-        "drawer handle": (
-            "drawer_handle",
-            "Locate only the movable pull or grip part of a drawer handle mounted on a drawer front. "
-            "Exclude fixed mounts, screws, the drawer front, surrounding furniture, and any non-graspable base region. "
-            "Only box the minimum directly operable area. Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-        "window handle": (
-            "window_handle",
-            "Locate only the movable handle part of a window handle that can be directly turned or grasped. "
-            "Exclude the fixed base, mounting plate, window frame, and surrounding structure. "
-            "Only box the minimum directly operable area. Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-        "remote control": (
-            "remote_control",
-            "Locate all remote control bodies that a robot gripper can directly pick up. "
-            "Exclude tables, walls, shadows, black masked regions, and any non-remote objects. "
-            "Use tight bounding boxes around each remote body. Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-        "switch": (
-            "switch",
-            "Locate two separate tight bounding boxes for the switch and output JSON only: "
-            "(1) the central pressable button or rocker located in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
-            "(2) the full switch panel or plate, including the button, exclude the surrounding wall and background. "
-            "Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-        "light switch": (
-            "light_switch",
-            "Locate two separate tight bounding boxes for the light switch and output JSON only: "
-            "(1) the central pressable button or rocker located in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
-            "(2) the full switch panel or plate, including the button, exclude the surrounding wall and background. "
-            "Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-        "lamp switch": (
-            "lamp_switch",
-            "Locate two separate tight bounding boxes for the lamp switch and output JSON only: "
-            "(1) the central pressable button located in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
-            "(2) the full switch panel or plate, including the button, exclude the surrounding wall and background. "
-            "Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-        "power plug": (
-            "power_plug",
-            "Locate only the graspable plug head of each power plug that can be directly pulled or inserted. "
-            "Exclude the cable, socket plate, wall, and surrounding surface. "
-            "Only box the minimum directly operable area. Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-        "thermostatic radiator valve": (
-            "thermostatic_radiator_valve",
-            "Locate only the rotatable control knob or turning head of each thermostatic radiator valve that can be directly rotated. "
-            "Exclude the pipe, radiator body, fixed base, wall, and surrounding structure. "
-            "Only box the minimum directly operable area. Return JSON only as a list of objects with bbox_2d fields and no label field."
-        ),
-    }
-    if normalized in prompt_map:
-        key, text = prompt_map[normalized]
-        return {"key": key, "text": text}
+    prompt_key = affordance_key_from_category(category)
     return {
-        "key": affordance_key_from_category(category),
+        "key": prompt_key,
         "text": (
-            f"Locate only the minimum directly operable area for the affordance category '{category}'. "
-            "Exclude fixed bases, non-interactable support structures, background, and surrounding objects. "
-            "Return JSON only as a list of objects with bbox_2d fields and no label field."
+            f"Locate every visible instance of affordance category '{category}' and output JSON only. "
+            "For each instance, return exactly two tight boxes. "
+            "part_index 1: the minimum directly operable region. "
+            "part_index 0: a connected non-core region of the same object outside that operable core, such as support, housing, mount, panel, stem, or body. "
+            "Do not duplicate part_index 1 as part_index 0 when a distinct attached non-core region is visible. "
+            "Keep both boxes on the same object instance and exclude unrelated objects, background, surfaces, black masked regions, and neighboring instances. "
+            "Return JSON only as a list of objects with fields bbox_2d and part_index."
         ),
     }
 
@@ -941,12 +883,28 @@ def dedupe_prompt_items(prompt_items: list[dict[str, str]]) -> list[dict[str, st
 
 
 def build_detection_entries(prompt_key: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for item in items:
+        bbox = item.get("bbox_2d")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        part_index = item.get("part_index", 1)
+        try:
+            part_index = int(part_index)
+        except Exception:
+            part_index = 1
+        label = 1 if part_index == 1 else 0
+        entries.append({"bbox": bbox, "label": label})
+
+    if entries:
+        return entries
+
     bboxes = [
         item.get("bbox_2d")
         for item in items
         if isinstance(item.get("bbox_2d"), list) and len(item.get("bbox_2d")) == 4
     ]
-    if prompt_key in {"door_handle", "switch", "light_switch", "lamp_switch"} and len(bboxes) == 2:
+    if len(bboxes) == 2:
         return [
             {"bbox": bboxes[0], "label": 0},
             {"bbox": bboxes[1], "label": 1},
@@ -976,19 +934,42 @@ def build_mask_refine_prompt(candidates: list[dict[str, Any]]) -> str:
             f"category={candidate['category']}, coarse_bbox=[{x1}, {y1}, {x2}, {y2}]"
         )
     return (
-        "The image contains pre-drawn candidate boxes. Each box label has the form candidate_id:instance_name. "
-        "Refine each candidate independently and do not skip any candidate. "
-        "For every candidate, return at least one tight bbox for the object inside that candidate box. "
-        "All returned boxes must stay within or very near the corresponding coarse candidate box and must tightly cover the visible object only.\n"
-        "Special rules:\n"
-        "- For category 'door handle', return exactly two boxes for that candidate: part_index 0 for the fixed base attached to the door, and part_index 1 for the movable lever/grip part.\n"
-        "- For category 'switch' or 'light switch', return exactly two boxes for that candidate: part_index 0 for the full switch panel/plate, and part_index 1 for the central pressable button or rocker.\n"
-        "- For category 'lamp switch', return exactly two boxes for that candidate: part_index 0 for the full switch panel/plate, and part_index 1 for the central pressable button.\n"
-        "- For all other categories, return exactly one box with part_index 1.\n"
+        "The image contains pre-drawn candidate boxes labeled candidate_id:instance_name. "
+        "Refine every candidate and do not skip any. "
+        "Use the whole image for context, but each final bbox must refer only to the object instance inside its own candidate box. "
+        "For every candidate, return exactly two tight bboxes. "
+        "Both boxes must stay strictly inside the corresponding coarse candidate box. "
+        "Do not use any area outside that candidate box for the final bbox.\n"
+        "Rules:\n"
+        "- part_index 1 is the minimum directly operable region.\n"
+        "- part_index 0 is a connected non-core region of the same object outside that operable core.\n"
+        "- part_index 0 must not duplicate part_index 1 when a distinct attached non-core region is visible.\n"
         "Return JSON only as a list of objects with fields: candidate_id, instance_name, category, part_index, bbox_2d.\n"
         "Candidates:\n"
         + "\n".join(candidate_lines)
     )
+
+
+def clamp_bbox_to_coarse_bbox(
+    bbox: list[Any],
+    coarse_bbox: list[int],
+) -> list[int] | None:
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        cx1, cy1, cx2, cy2 = [int(v) for v in coarse_bbox]
+    except Exception:
+        return None
+
+    x1 = max(cx1, min(x1, cx2))
+    y1 = max(cy1, min(y1, cy2))
+    x2 = max(cx1, min(x2, cx2))
+    y2 = max(cy1, min(y2, cy2))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
 
 
 def parse_mask_refine_response(
@@ -1003,10 +984,10 @@ def parse_mask_refine_response(
         candidate_id = str(item.get("candidate_id", "")).strip()
         if candidate_id not in candidate_map:
             continue
-        bbox = item.get("bbox_2d")
-        if not isinstance(bbox, list) or len(bbox) != 4:
-            continue
         candidate = candidate_map[candidate_id]
+        bbox = clamp_bbox_to_coarse_bbox(item.get("bbox_2d"), candidate["coarse_bbox"])
+        if bbox is None:
+            continue
         prompt_key = candidate["prompt_key"]
         part_index = item.get("part_index", 1)
         try:
@@ -1028,7 +1009,7 @@ def parse_mask_refine_response(
 
     missing_candidates: list[str] = []
     for candidate in candidates:
-        expected_parts = [0, 1] if candidate["prompt_key"] in {"door_handle", "switch", "light_switch", "lamp_switch"} else [1]
+        expected_parts = [0, 1]
         if any((candidate["candidate_id"], part_index) not in seen_candidate_parts for part_index in expected_parts):
             missing_candidates.append(candidate["candidate_id"])
     return objects, missing_candidates
