@@ -1033,17 +1033,18 @@ def build_scene_frame_summary(
 ) -> dict[str, Any]:
     frame_category_map = load_scene_annotation_map(scene_json_path)
     ordered_frame_indices = sorted(frame_category_map.keys())
+    selected_frame_indices = ordered_frame_indices[:: args.stride]
     scene_vis_root = Path(args.output_image_dir) / scene_id if args.output_image_dir else None
     if scene_vis_root:
         scene_vis_root.mkdir(parents=True, exist_ok=True)
 
     failures: list[tuple[int, str]] = []
     summary_frames: list[dict[str, Any]] = []
-    iterator = ordered_frame_indices
+    iterator = selected_frame_indices
     if tqdm is not None:
         iterator = tqdm(
-            ordered_frame_indices,
-            total=len(ordered_frame_indices),
+            selected_frame_indices,
+            total=len(selected_frame_indices),
             desc=f"Scene {scene_id}",
             unit="frame",
         )
@@ -1153,6 +1154,8 @@ def build_scene_frame_summary(
         "annotation_json": str(scene_json_path),
         "image_count": len(scene_image_refs),
         "requested_frame_count": len(ordered_frame_indices),
+        "processed_frame_count": len(selected_frame_indices),
+        "stride": args.stride,
         "frames": summary_frames,
         "failures": [
             {"frame_index": frame_index, "error": error}
