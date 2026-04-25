@@ -274,52 +274,44 @@ def prompt_from_affordance_category(category: str) -> dict[str, str]:
     prompt_key = affordance_key_from_category(category)
     prompt_map = {
         "door handle": (
-            "Locate two separate tight bounding boxes for a true door handle mounted on a door and output JSON only. "
-            "part_index 0: the fixed base or mounting plate attached to the door, exclude the movable lever. "
-            "part_index 1: the movable lever or grip part used to open the door, exclude the base, door surface, and surrounding objects. "
-            "Return JSON only as a list of objects with fields bbox_2d and part_index."
+            "Locate two separate tight bounding boxes for a true door handle mounted on a door and output JSON only: "
+            "(1) the fixed base / mounting plate attached to the door, exclude the movable lever; "
+            "(2) the movable lever / grip part used to open the door, exclude the base, door surface, and surrounding objects."
         ),
         "drawer handle": (
-            "Locate two separate tight bounding boxes for a true drawer handle mounted on a drawer front and output JSON only. "
-            "part_index 0: the fixed base or mount attached to the drawer front, exclude the movable pull. "
-            "part_index 1: the movable pull or grip part used to open the drawer, exclude the base, drawer front, and surrounding furniture. "
-            "Return JSON only as a list of objects with fields bbox_2d and part_index."
+            "Locate two separate tight bounding boxes for a true drawer handle mounted on a drawer front and output JSON only: "
+            "(1) the fixed base / mount attached to the drawer front, exclude the movable pull; "
+            "(2) the movable pull / grip part used to open the drawer, exclude the base, drawer front, and surrounding furniture."
         ),
         "window handle": (
-            "Locate two separate tight bounding boxes for a true window handle mounted on a window frame and output JSON only. "
-            "part_index 0: the fixed base attached to the window frame, exclude the movable handle. "
-            "part_index 1: the movable handle or grip part used to open or turn the window handle, exclude the base, frame, and surrounding structure. "
-            "Return JSON only as a list of objects with fields bbox_2d and part_index."
+            "Locate two separate tight bounding boxes for a true window handle mounted on a window frame and output JSON only: "
+            "(1) the fixed base attached to the window frame, exclude the movable handle; "
+            "(2) the movable handle / grip part used to open or turn the window handle, exclude the base, frame, and surrounding structure."
         ),
         "switch": (
-            "Locate two separate tight bounding boxes for the switch and output JSON only. "
-            "part_index 0: the full switch panel or plate, exclude the surrounding wall and background. "
-            "part_index 1: the central pressable button, rocker, or toggle in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background. "
-            "Return JSON only as a list of objects with fields bbox_2d and part_index."
+            "Locate two separate tight bounding boxes for the switch and output JSON only: "
+            "(1) the central pressable button or rocker located in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
+            "(2) the full switch panel / plate, including the button, exclude the surrounding wall and background."
         ),
         "light switch": (
-            "Locate two separate tight bounding boxes for the light switch and output JSON only. "
-            "part_index 0: the full switch panel or plate, exclude the surrounding wall and background. "
-            "part_index 1: the central pressable button, rocker, or toggle in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background. "
-            "Return JSON only as a list of objects with fields bbox_2d and part_index."
+            "Locate two separate tight bounding boxes for the light switch and output JSON only: "
+            "(1) the central pressable button or rocker located in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
+            "(2) the full switch panel / plate, including the button, exclude the surrounding wall and background."
         ),
         "lamp switch": (
-            "Locate two separate tight bounding boxes for the lamp switch and output JSON only. "
-            "part_index 0: the entire switch panel or plate, including the button, exclude the surrounding wall and background. "
-            "part_index 1: the central pressable button in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background. "
-            "Return JSON only as a list of objects with fields bbox_2d and part_index."
+            "Locate two separate tight bounding boxes for the lamp switch and output JSON only: "
+            "(1) the central pressable button in the middle of the switch panel, exclude the outer plate, frame, wall, and surrounding background; "
+            "(2) the entire switch panel/plate, including the button, exclude the surrounding wall and background."
         ),
         "power plug": (
-            "Locate two separate tight bounding boxes for the power plug and output JSON only. "
-            "part_index 0: the plug body or housing outside the graspable tip, exclude the cable and surrounding socket or wall. "
-            "part_index 1: the graspable plug head used to pull or insert the plug, exclude the cable, socket plate, wall, and surrounding surface. "
-            "Return JSON only as a list of objects with fields bbox_2d and part_index."
+            "Locate two separate tight bounding boxes for the power plug and output JSON only: "
+            "(1) the graspable plug head used to pull or insert the plug, exclude the cable, socket plate, wall, and surrounding surface; "
+            "(2) the plug body / housing outside the graspable tip, exclude the cable and surrounding socket or wall."
         ),
         "thermostatic radiator valve": (
-            "Locate two separate tight bounding boxes for the thermostatic radiator valve and output JSON only. "
-            "part_index 0: the fixed valve body or attached housing, exclude the rotatable control head. "
-            "part_index 1: the rotatable control knob or turning head, exclude the pipe, radiator body, wall, and surrounding structure. "
-            "Return JSON only as a list of objects with fields bbox_2d and part_index."
+            "Locate two separate tight bounding boxes for the thermostatic radiator valve and output JSON only: "
+            "(1) the rotatable control knob / turning head, exclude the fixed valve body, pipe, radiator body, wall, and surrounding structure; "
+            "(2) the fixed valve body / attached housing, exclude the rotatable control head."
         ),
     }
     if normalized in prompt_map:
