@@ -461,6 +461,43 @@ def build_client(api_key: str, region: str) -> OpenAI:
     return OpenAI(api_key=api_key, base_url=BASE_URLS[region])
 
 
+def extract_usage_dict(completion: Any) -> dict[str, Any] | None:
+    usage = getattr(completion, "usage", None)
+    if usage is None:
+        return None
+
+    if hasattr(usage, "model_dump"):
+        dumped = usage.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+
+    fields = [
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "image_tokens",
+    ]
+    result = {
+        field: getattr(usage, field)
+        for field in fields
+        if getattr(usage, field, None) is not None
+    }
+    return result or None
+
+
+def sum_usage_dicts(usages: list[dict[str, Any] | None]) -> dict[str, Any] | None:
+    total: dict[str, Any] = {}
+    for usage in usages:
+        if not usage:
+            continue
+        for key, value in usage.items():
+            if isinstance(value, (int, float)):
+                total[key] = total.get(key, 0) + value
+    return total or None
+
+
 def infer_image_bytes(
     client: OpenAI,
     image_bytes: bytes,
@@ -469,7 +506,7 @@ def infer_image_bytes(
     min_pixels: int,
     max_pixels: int,
     mime_type: str = "image/jpeg",
-) -> str:
+) -> dict[str, Any]:
     import base64
 
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
@@ -497,7 +534,10 @@ def infer_image_bytes(
         }
     ]
     completion = client.chat.completions.create(model=model, messages=messages)
-    return sanitize_response_text(completion.choices[0].message.content or "")
+    return {
+        "response_text": sanitize_response_text(completion.choices[0].message.content or ""),
+        "usage": extract_usage_dict(completion),
+    }
 
 
 def infer(
@@ -507,7 +547,7 @@ def infer(
     model: str,
     min_pixels: int,
     max_pixels: int,
-) -> str:
+) -> dict[str, Any]:
     mime_type = "image/jpeg"
     if not is_url(image_ref):
         suffix = Path(image_ref).suffix.lower()
@@ -668,7 +708,7 @@ def process_one(
     output_json: str | None = None,
     output_image: str | None = None,
 ) -> str:
-    response_text = infer(
+    infer_result = infer(
         client,
         image_ref,
         prompt,
@@ -676,11 +716,23 @@ def process_one(
         min_pixels,
         max_pixels,
     )
+    response_text = infer_result["response_text"]
+    usage = infer_result.get("usage")
     print(f"=== {image_ref} ===")
     print(response_text)
+    if usage:
+        print(f"usage: {json.dumps(usage, ensure_ascii=False)}")
 
     if output_json:
-        save_json(output_json, response_text)
+        ensure_parent_dir(output_json)
+        payload = {
+            "image": image_ref,
+            "model": model,
+            "prompt": prompt,
+            "response": response_text,
+            "usage": usage,
+        }
+        Path(output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"Saved JSON to {output_json}")
 
     if output_image:
@@ -732,7 +784,7 @@ def process_one_with_prompts(
     for idx, prompt_item in enumerate(prompts, start=1):
         prompt = prompt_item["text"]
         print(f"--- prompt {idx}/{len(prompts)} ---")
-        response_text = infer(
+        infer_result = infer(
             client,
             image_ref,
             prompt,
@@ -740,19 +792,25 @@ def process_one_with_prompts(
             min_pixels,
             max_pixels,
         )
+        response_text = infer_result["response_text"]
+        usage = infer_result.get("usage")
         print(response_text)
+        if usage:
+            print(f"usage: {json.dumps(usage, ensure_ascii=False)}")
         all_results.append(
             {
                 "prompt_index": idx - 1,
                 "prompt_key": prompt_item["key"],
                 "prompt": prompt,
                 "response": response_text,
+                "usage": usage,
             }
         )
 
     payload = {
         "image": image_ref,
         "model": model,
+        "usage": sum_usage_dicts([result.get("usage") for result in all_results]),
         "results": all_results,
     }
 
@@ -804,6 +862,7 @@ def process_batch(client: OpenAI, args: argparse.Namespace) -> None:
                     "image": image_ref,
                     "processed": False,
                     "skip_reason": f"stride={args.stride}",
+                    "usage": None,
                     "objects": {},
                 }
             )
@@ -833,6 +892,7 @@ def process_batch(client: OpenAI, args: argparse.Namespace) -> None:
                     "frame_index": frame_index,
                     "image": image_ref,
                     "processed": True,
+                    "usage": payload.get("usage"),
                     "objects": objects,
                 }
             )
@@ -846,6 +906,7 @@ def process_batch(client: OpenAI, args: argparse.Namespace) -> None:
                     "image": image_ref,
                     "processed": True,
                     "error": str(exc),
+                    "usage": None,
                     "objects": {},
                 }
             )
@@ -855,6 +916,7 @@ def process_batch(client: OpenAI, args: argparse.Namespace) -> None:
         "model": args.model,
         "stride": args.stride,
         "prompts": prompts,
+        "usage": sum_usage_dicts([frame.get("usage") for frame in summary_frames]),
         "frames": summary_frames,
     }
     summary_path = args.output_json or str(Path(args.image_dir) / "grounding_summary.json")
@@ -1089,7 +1151,7 @@ def build_scene_frame_summary(
                 buffer = BytesIO()
                 annotated_image.save(buffer, format="PNG")
                 prompt = build_mask_refine_prompt(candidates)
-                response_text = infer_image_bytes(
+                infer_result = infer_image_bytes(
                     client=client,
                     image_bytes=buffer.getvalue(),
                     prompt=prompt,
@@ -1097,10 +1159,15 @@ def build_scene_frame_summary(
                     min_pixels=args.min_pixels,
                     max_pixels=args.max_pixels,
                 )
+                response_text = infer_result["response_text"]
+                usage = infer_result.get("usage")
                 print(f"=== {image_ref} ===")
                 print(response_text)
+                if usage:
+                    print(f"usage: {json.dumps(usage, ensure_ascii=False)}")
                 objects, missing_candidates = parse_mask_refine_response(response_text, candidates)
                 frame_summary["objects"] = objects
+                frame_summary["usage"] = usage
                 if missing_candidates:
                     frame_summary["missing_candidates"] = missing_candidates
                 if output_image:
@@ -1136,6 +1203,7 @@ def build_scene_frame_summary(
                     objects.setdefault(prompt_key, [])
                     objects[prompt_key].extend(build_detection_entries(prompt_key, items))
                 frame_summary["objects"] = objects
+                frame_summary["usage"] = payload.get("usage")
         except Exception as exc:
             frame_summary["error"] = str(exc)
             failures.append((frame_index, str(exc)))
@@ -1150,6 +1218,7 @@ def build_scene_frame_summary(
         "processed_frame_count": len(selected_frame_indices),
         "stride": args.stride,
         "reverse": args.reverse,
+        "usage": sum_usage_dicts([frame.get("usage") for frame in summary_frames]),
         "frames": summary_frames,
         "failures": [
             {"frame_index": frame_index, "error": error}
@@ -1199,6 +1268,7 @@ def process_scene_jsons(client: OpenAI, args: argparse.Namespace) -> None:
         "data_root": str(Path(args.data_root).expanduser().resolve()),
         "model": args.model,
         "mode": args.mode,
+        "usage": sum_usage_dicts([scene.get("usage") for scene in scenes]),
         "scenes": scenes,
     }
     summary_path = args.output_json or str(Path.cwd() / "scene_grounding_summary.json")

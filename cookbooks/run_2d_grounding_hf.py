@@ -100,7 +100,7 @@ def infer_hf_image_bytes(
     min_pixels: int,
     max_pixels: int,
     mime_type: str = "image/jpeg",
-) -> str:
+) -> dict[str, Any]:
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
     messages = [
         {
@@ -149,7 +149,10 @@ def infer_hf_image_bytes(
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0]
-    return api_impl.sanitize_response_text(text or "")
+    return {
+        "response_text": api_impl.sanitize_response_text(text or ""),
+        "usage": None,
+    }
 
 
 def infer_hf(
@@ -159,7 +162,7 @@ def infer_hf(
     model: str,
     min_pixels: int,
     max_pixels: int,
-) -> str:
+) -> dict[str, Any]:
     mime_type = "image/jpeg"
     if not api_impl.is_url(image_ref):
         suffix = Path(image_ref).suffix.lower()
