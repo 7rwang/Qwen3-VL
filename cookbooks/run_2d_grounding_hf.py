@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene-json", help="Path to one scene annotation JSON, e.g. 421254.json.")
     parser.add_argument("--scene-json-dir", help="Directory containing many scene annotation JSON files.")
     parser.add_argument("--scene-id", help="Optional scene id to process one scene from --scene-json-dir.")
+    parser.add_argument(
+        "--scene-ids",
+        help="Optional comma-separated scene ids to process from --scene-json-dir, e.g. 421254,421255.",
+    )
     parser.add_argument("--prompt", help="Grounding prompt to send to the model.")
     parser.add_argument("--prompt-file", help="Optional text file containing one prompt per non-empty line.")
     parser.add_argument("--model", default="Qwen/Qwen3-VL-32B-Instruct", help="HF model id or local path.")
@@ -192,7 +196,7 @@ def main() -> None:
     args = parse_args()
     patch_backend_functions()
     client = build_backend(args)
-    if args.scene_json or args.scene_json_dir or args.scene_id:
+    if args.scene_json or args.scene_json_dir or args.scene_id or args.scene_ids:
         api_impl.process_scene_jsons(client, args)
         return
     if args.image_dir:

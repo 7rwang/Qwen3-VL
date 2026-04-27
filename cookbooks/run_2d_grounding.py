@@ -63,6 +63,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene-json", help="Path to one scene annotation JSON, e.g. 421254.json.")
     parser.add_argument("--scene-json-dir", help="Directory containing many scene annotation JSON files.")
     parser.add_argument("--scene-id", help="Optional scene id to process one scene from --scene-json-dir.")
+    parser.add_argument(
+        "--scene-ids",
+        help="Optional comma-separated scene ids to process from --scene-json-dir, e.g. 421254,421255.",
+    )
     parser.add_argument("--prompt", help="Grounding prompt to send to the model.")
     parser.add_argument(
         "--prompt-file",
@@ -99,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-json-dir",
-        help="Deprecated in batch mode. Kept only for backward compatibility.",
+        help="Scene mode: directory to save one JSON per scene. Deprecated in batch mode.",
     )
     parser.add_argument(
         "--glob",
@@ -135,15 +139,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    source_flags = [bool(args.image), bool(args.image_dir), bool(args.scene_json), bool(args.scene_json_dir or args.scene_id)]
+    scene_ids = getattr(args, "scene_ids", None)
+    source_flags = [bool(args.image), bool(args.image_dir), bool(args.scene_json), bool(args.scene_json_dir or args.scene_id or scene_ids)]
     if sum(source_flags) != 1:
-        raise SystemExit("Specify exactly one source mode: --image, --image-dir, --scene-json, or --scene-json-dir/--scene-id.")
+        raise SystemExit("Specify exactly one source mode: --image, --image-dir, --scene-json, or --scene-json-dir/--scene-id/--scene-ids.")
     if (args.image or args.image_dir) and bool(args.prompt) == bool(args.prompt_file):
         raise SystemExit("For image/image-dir mode, specify exactly one of --prompt or --prompt-file.")
     if (args.scene_json or args.scene_json_dir or args.scene_id) and (args.prompt or args.prompt_file):
         raise SystemExit("In scene-json mode, prompts are generated automatically from affordance categories; do not pass --prompt or --prompt-file.")
     if args.scene_id and not args.scene_json_dir:
         raise SystemExit("--scene-id requires --scene-json-dir.")
+    if scene_ids and not args.scene_json_dir:
+        raise SystemExit("--scene-ids requires --scene-json-dir.")
+    if args.scene_id and scene_ids:
+        raise SystemExit("Use only one of --scene-id or --scene-ids.")
     if (args.scene_json or args.scene_json_dir or args.scene_id) and not args.data_root:
         raise SystemExit("Scene-json mode requires --data-root.")
     if args.image_dir and args.output_image:
@@ -362,7 +371,24 @@ def load_scene_annotation_map(json_path: str | Path) -> dict[int, list[str]]:
     return frame_map
 
 
-def resolve_scene_json_paths(scene_json: str | None, scene_json_dir: str | None, scene_id: str | None) -> list[Path]:
+def parse_scene_ids(scene_ids: str | None) -> list[str]:
+    if not scene_ids:
+        return []
+    ids = [item.strip() for item in scene_ids.split(",") if item.strip()]
+    if not ids:
+        raise SystemExit("--scene-ids was provided but no scene ids were found.")
+    duplicates = sorted({scene_id for scene_id in ids if ids.count(scene_id) > 1})
+    if duplicates:
+        raise SystemExit(f"--scene-ids contains duplicate scene ids: {', '.join(duplicates)}")
+    return ids
+
+
+def resolve_scene_json_paths(
+    scene_json: str | None,
+    scene_json_dir: str | None,
+    scene_id: str | None,
+    scene_ids: str | None = None,
+) -> list[Path]:
     if scene_json:
         return [Path(scene_json).expanduser().resolve()]
     assert scene_json_dir is not None
@@ -374,6 +400,23 @@ def resolve_scene_json_paths(scene_json: str | None, scene_json_dir: str | None,
         if not target.exists():
             raise SystemExit(f"Scene json not found for scene id {scene_id}: {target}")
         return [target]
+    selected_scene_ids = parse_scene_ids(scene_ids)
+    if selected_scene_ids:
+        paths: list[Path] = []
+        missing: list[str] = []
+        for selected_scene_id in selected_scene_ids:
+            target = root / f"{selected_scene_id}.json"
+            if target.exists():
+                paths.append(target)
+            else:
+                missing.append(selected_scene_id)
+        if missing:
+            raise SystemExit(
+                "Scene json not found for scene ids: "
+                + ", ".join(missing)
+                + f" under {root}"
+            )
+        return paths
     return sorted(path for path in root.glob("*.json") if path.is_file())
 
 
@@ -1340,11 +1383,30 @@ def build_scene_frame_summary(
 
 
 def process_scene_jsons(client: OpenAI, args: argparse.Namespace) -> None:
-    scene_json_paths = resolve_scene_json_paths(args.scene_json, args.scene_json_dir, args.scene_id)
+    scene_json_paths = resolve_scene_json_paths(
+        args.scene_json,
+        args.scene_json_dir,
+        args.scene_id,
+        getattr(args, "scene_ids", None),
+    )
     if not scene_json_paths:
         raise SystemExit("No scene json files found.")
+    if len(scene_json_paths) > 1 and args.output_json:
+        raise SystemExit(
+            "Scene-json mode writes one JSON file per scene. "
+            "Use --output-json-dir for multiple scenes instead of --output-json."
+        )
 
-    scenes: list[dict[str, Any]] = []
+    scene_output_root = None
+    if args.output_json_dir:
+        scene_output_root = Path(args.output_json_dir).expanduser().resolve()
+    elif len(scene_json_paths) > 1:
+        scene_output_root = Path.cwd() / "scene_grounding_outputs"
+    if scene_output_root:
+        if scene_output_root.exists() and not scene_output_root.is_dir():
+            raise SystemExit(f"--output-json-dir is not a directory: {scene_output_root}")
+        scene_output_root.mkdir(parents=True, exist_ok=True)
+
     scene_failures: list[tuple[str, str]] = []
     for scene_json_path in scene_json_paths:
         scene_id = scene_json_path.stem
@@ -1357,7 +1419,6 @@ def process_scene_jsons(client: OpenAI, args: argparse.Namespace) -> None:
                 scene_json_path=scene_json_path,
                 scene_image_refs=scene_image_refs,
             )
-            scenes.append(scene_summary)
             if scene_summary["failures"]:
                 scene_failures.extend(
                     (scene_id, f"frame {item['frame_index']}: {item['error']}")
@@ -1366,27 +1427,27 @@ def process_scene_jsons(client: OpenAI, args: argparse.Namespace) -> None:
         except Exception as exc:
             scene_failures.append((scene_id, str(exc)))
             print(f"[ERROR] scene={scene_id}: {exc}")
-            scenes.append(
-                {
-                    "scene_id": scene_id,
-                    "annotation_json": str(scene_json_path),
-                    "frames": [],
-                    "error": str(exc),
-                    "failures": [],
-                }
-            )
+            scene_summary = {
+                "scene_id": scene_id,
+                "annotation_json": str(scene_json_path),
+                "frames": [],
+                "error": str(exc),
+                "failures": [],
+            }
 
-    summary_payload = {
-        "data_root": str(Path(args.data_root).expanduser().resolve()),
-        "model": args.model,
-        "mode": args.mode,
-        "usage": sum_usage_dicts([scene.get("usage") for scene in scenes]),
-        "scenes": scenes,
-    }
-    summary_path = args.output_json or str(Path.cwd() / "scene_grounding_summary.json")
-    ensure_parent_dir(summary_path)
-    Path(summary_path).write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"Saved summary JSON to {summary_path}")
+        scene_payload = {
+            "data_root": str(Path(args.data_root).expanduser().resolve()),
+            "model": args.model,
+            "mode": args.mode,
+            **scene_summary,
+        }
+        if scene_output_root:
+            scene_output_path = scene_output_root / f"{scene_id}.json"
+        else:
+            scene_output_path = Path(args.output_json) if args.output_json else Path.cwd() / f"{scene_id}.json"
+        ensure_parent_dir(scene_output_path)
+        scene_output_path.write_text(json.dumps(scene_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"Saved scene JSON to {scene_output_path}")
 
     if scene_failures:
         raise SystemExit(
@@ -1399,7 +1460,7 @@ def main() -> None:
     args = parse_args()
     api_key = require_api_key()
     client = build_client(api_key, args.region)
-    if args.scene_json or args.scene_json_dir or args.scene_id:
+    if args.scene_json or args.scene_json_dir or args.scene_id or args.scene_ids:
         process_scene_jsons(client, args)
         return
     if args.image_dir:
