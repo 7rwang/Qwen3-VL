@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", help="Grounding prompt to send to the model.")
     parser.add_argument("--prompt-file", help="Optional text file containing one prompt per non-empty line.")
     parser.add_argument("--model", default="Qwen/Qwen3-VL-32B-Instruct", help="HF model id or local path.")
+    parser.add_argument("--base-url", help="Ignored by the HuggingFace backend. Kept for CLI compatibility with the API script.")
     parser.add_argument("--mode", choices=["auto", "bbox", "point"], default="auto")
     parser.add_argument("--output-image", help="Optional output path for a rendered visualization in single-image mode.")
     parser.add_argument("--output-json", help="Single-image mode: save the raw model response. Batch mode: save the summary JSON.")
@@ -187,7 +188,7 @@ def infer_hf(
 
 def patch_backend_functions() -> None:
     api_impl.require_api_key = lambda: ""
-    api_impl.build_client = lambda api_key, region: None
+    api_impl.build_client = lambda *args, **kwargs: None
     api_impl.infer = infer_hf
     api_impl.infer_image_bytes = infer_hf_image_bytes
 

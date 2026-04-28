@@ -84,6 +84,10 @@ def parse_args() -> argparse.Namespace:
         help="DashScope region for the OpenAI-compatible endpoint.",
     )
     parser.add_argument(
+        "--base-url",
+        help="Override the OpenAI-compatible API base URL. If set, this takes precedence over --region.",
+    )
+    parser.add_argument(
         "--mode",
         choices=["auto", "bbox", "point"],
         default="auto",
@@ -581,8 +585,8 @@ def ensure_parent_dir(path: str | Path) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
-def build_client(api_key: str, region: str) -> OpenAI:
-    return OpenAI(api_key=api_key, base_url=BASE_URLS[region])
+def build_client(api_key: str, region: str, base_url: str | None = None) -> OpenAI:
+    return OpenAI(api_key=api_key, base_url=base_url or BASE_URLS[region])
 
 
 def extract_usage_dict(completion: Any) -> dict[str, Any] | None:
@@ -1459,7 +1463,7 @@ def process_scene_jsons(client: OpenAI, args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     api_key = require_api_key()
-    client = build_client(api_key, args.region)
+    client = build_client(api_key, args.region, args.base_url)
     if args.scene_json or args.scene_json_dir or args.scene_id or args.scene_ids:
         process_scene_jsons(client, args)
         return
