@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
         "--frame-indices",
         help="Optional comma-separated frame indices to process, e.g. 0,5,10. Overrides --stride and --reverse.",
     )
+    parser.add_argument(
+        "--append-mode",
+        action="store_true",
+        help="Append new frame results to existing JSON files instead of overwriting. Only works with --frame-indices.",
+    )
     parser.add_argument("--prompt", help="Grounding prompt to send to the model.")
     parser.add_argument(
         "--prompt-file",
@@ -84,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--region",
         choices=sorted(BASE_URLS.keys()),
-        default="beijing",
+        default="singapore",
         help="DashScope region for the OpenAI-compatible endpoint.",
     )
     parser.add_argument(
@@ -164,6 +169,9 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("Use only one of --scene-id or --scene-ids.")
     if frame_indices and not (args.scene_json or args.scene_json_dir or args.scene_id or scene_ids):
         raise SystemExit("--frame-indices can only be used with scene-json mode.")
+    append_mode = getattr(args, "append_mode", False)
+    if append_mode and not frame_indices:
+        raise SystemExit("--append-mode can only be used with --frame-indices.")
     if (args.scene_json or args.scene_json_dir or args.scene_id) and not args.data_root:
         raise SystemExit("Scene-json mode requires --data-root.")
     if args.image_dir and args.output_image:
@@ -415,6 +423,75 @@ def parse_frame_indices(frame_indices: str | None) -> list[int]:
     if duplicates:
         raise SystemExit(f"--frame-indices contains duplicate frame indices: {', '.join(map(str, duplicates))}")
     return indices
+
+
+def load_existing_scene_json(json_path: Path) -> dict[str, Any] | None:
+    """Load existing scene JSON file if it exists and is valid."""
+    if not json_path.exists():
+        return None
+    
+    try:
+        content = json_path.read_text(encoding="utf-8")
+        existing_data = json.loads(content)
+        if not isinstance(existing_data, dict):
+            print(f"Warning: Existing JSON file {json_path} is not a valid object, will be overwritten")
+            return None
+        return existing_data
+    except Exception as e:
+        print(f"Warning: Could not load existing JSON file {json_path}: {e}, will be overwritten")
+        return None
+
+
+def merge_scene_frames(existing_data: dict[str, Any], new_summary: dict[str, Any]) -> dict[str, Any]:
+    """Merge new frame results into existing scene data."""
+    if existing_data is None:
+        return new_summary
+    
+    # Start with existing data
+    merged = existing_data.copy()
+    
+    # Update metadata with new processing info
+    merged["processed_frame_count"] = existing_data.get("processed_frame_count", 0) + new_summary["processed_frame_count"]
+    
+    # Merge usage stats
+    existing_usage = existing_data.get("usage")
+    new_usage = new_summary.get("usage")
+    merged["usage"] = sum_usage_dicts([existing_usage, new_usage])
+    
+    # Merge frames - create a map of frame_index -> frame_data
+    existing_frames = {frame["frame_index"]: frame for frame in existing_data.get("frames", [])}
+    
+    # Add/update frames from new summary
+    for new_frame in new_summary["frames"]:
+        frame_index = new_frame["frame_index"]
+        existing_frames[frame_index] = new_frame  # This will overwrite if frame already exists
+    
+    # Convert back to sorted list
+    merged["frames"] = sorted(existing_frames.values(), key=lambda x: x["frame_index"])
+    
+    # Merge failures
+    existing_failures = {f["frame_index"]: f for f in existing_data.get("failures", [])}
+    for new_failure in new_summary.get("failures", []):
+        existing_failures[new_failure["frame_index"]] = new_failure
+    merged["failures"] = sorted(existing_failures.values(), key=lambda x: x["frame_index"])
+    
+    # Update selection method info - keep track of what was used
+    if "append_history" not in merged:
+        merged["append_history"] = []
+    
+    append_entry = {
+        "selection_method": new_summary.get("selection_method"),
+        "processed_frame_count": new_summary["processed_frame_count"]
+    }
+    if "frame_indices" in new_summary:
+        append_entry["frame_indices"] = new_summary["frame_indices"]
+    if "stride" in new_summary:
+        append_entry["stride"] = new_summary["stride"]
+        append_entry["reverse"] = new_summary["reverse"]
+    
+    merged["append_history"].append(append_entry)
+    
+    return merged
 
 
 def resolve_scene_json_paths(
@@ -1493,19 +1570,37 @@ def process_scene_jsons(client: OpenAI, args: argparse.Namespace) -> None:
                 "failures": [],
             }
 
-        scene_payload = {
-            "data_root": str(Path(args.data_root).expanduser().resolve()),
-            "model": args.model,
-            "mode": args.mode,
-            **scene_summary,
-        }
+        # Determine output path
         if scene_output_root:
             scene_output_path = scene_output_root / f"{scene_id}.json"
         else:
             scene_output_path = Path(args.output_json) if args.output_json else Path.cwd() / f"{scene_id}.json"
+        
+        # Handle append mode
+        append_mode = getattr(args, "append_mode", False)
+        if append_mode:
+            existing_data = load_existing_scene_json(scene_output_path)
+            merged_summary = merge_scene_frames(existing_data, scene_summary)
+            scene_payload = {
+                "data_root": str(Path(args.data_root).expanduser().resolve()),
+                "model": args.model,
+                "mode": args.mode,
+                **merged_summary,
+            }
+            print(f"Appending {len(scene_summary['frames'])} frame(s) to existing scene JSON")
+        else:
+            scene_payload = {
+                "data_root": str(Path(args.data_root).expanduser().resolve()),
+                "model": args.model,
+                "mode": args.mode,
+                **scene_summary,
+            }
+        
         ensure_parent_dir(scene_output_path)
         scene_output_path.write_text(json.dumps(scene_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(f"Saved scene JSON to {scene_output_path}")
+        
+        action = "Appended to" if append_mode else "Saved"
+        print(f"{action} scene JSON to {scene_output_path}")
 
     if scene_failures:
         raise SystemExit(
