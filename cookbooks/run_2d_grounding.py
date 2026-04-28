@@ -67,6 +67,10 @@ def parse_args() -> argparse.Namespace:
         "--scene-ids",
         help="Optional comma-separated scene ids to process from --scene-json-dir, e.g. 421254,421255.",
     )
+    parser.add_argument(
+        "--frame-indices",
+        help="Optional comma-separated frame indices to process, e.g. 0,5,10. Overrides --stride and --reverse.",
+    )
     parser.add_argument("--prompt", help="Grounding prompt to send to the model.")
     parser.add_argument(
         "--prompt-file",
@@ -144,6 +148,7 @@ def parse_args() -> argparse.Namespace:
 
 def validate_args(args: argparse.Namespace) -> None:
     scene_ids = getattr(args, "scene_ids", None)
+    frame_indices = getattr(args, "frame_indices", None)
     source_flags = [bool(args.image), bool(args.image_dir), bool(args.scene_json), bool(args.scene_json_dir or args.scene_id or scene_ids)]
     if sum(source_flags) != 1:
         raise SystemExit("Specify exactly one source mode: --image, --image-dir, --scene-json, or --scene-json-dir/--scene-id/--scene-ids.")
@@ -157,6 +162,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--scene-ids requires --scene-json-dir.")
     if args.scene_id and scene_ids:
         raise SystemExit("Use only one of --scene-id or --scene-ids.")
+    if frame_indices and not (args.scene_json or args.scene_json_dir or args.scene_id or scene_ids):
+        raise SystemExit("--frame-indices can only be used with scene-json mode.")
     if (args.scene_json or args.scene_json_dir or args.scene_id) and not args.data_root:
         raise SystemExit("Scene-json mode requires --data-root.")
     if args.image_dir and args.output_image:
@@ -385,6 +392,29 @@ def parse_scene_ids(scene_ids: str | None) -> list[str]:
     if duplicates:
         raise SystemExit(f"--scene-ids contains duplicate scene ids: {', '.join(duplicates)}")
     return ids
+
+
+def parse_frame_indices(frame_indices: str | None) -> list[int]:
+    if not frame_indices:
+        return []
+    indices_str = [item.strip() for item in frame_indices.split(",") if item.strip()]
+    if not indices_str:
+        raise SystemExit("--frame-indices was provided but no frame indices were found.")
+    
+    indices = []
+    for idx_str in indices_str:
+        try:
+            idx = int(idx_str)
+            if idx < 0:
+                raise SystemExit(f"Frame indices must be non-negative integers, got: {idx}")
+            indices.append(idx)
+        except ValueError:
+            raise SystemExit(f"Invalid frame index '{idx_str}', must be an integer.")
+    
+    duplicates = sorted({idx for idx in indices if indices.count(idx) > 1})
+    if duplicates:
+        raise SystemExit(f"--frame-indices contains duplicate frame indices: {', '.join(map(str, duplicates))}")
+    return indices
 
 
 def resolve_scene_json_paths(
@@ -1245,9 +1275,23 @@ def build_scene_frame_summary(
 ) -> dict[str, Any]:
     frame_category_map = load_scene_annotation_map(scene_json_path)
     ordered_frame_indices = sorted(frame_category_map.keys())
-    if args.reverse:
-        ordered_frame_indices = list(reversed(ordered_frame_indices))
-    selected_frame_indices = ordered_frame_indices[:: args.stride]
+    
+    # Check if specific frame indices are provided
+    frame_indices = getattr(args, "frame_indices", None)
+    if frame_indices:
+        specified_indices = parse_frame_indices(frame_indices)
+        # Filter to only include indices that exist in the annotation
+        selected_frame_indices = [idx for idx in specified_indices if idx in frame_category_map]
+        if not selected_frame_indices:
+            raise SystemExit(f"None of the specified frame indices {specified_indices} exist in scene {scene_id}")
+        if len(selected_frame_indices) != len(specified_indices):
+            missing = [idx for idx in specified_indices if idx not in frame_category_map]
+            print(f"Warning: Frame indices {missing} not found in scene {scene_id} annotation, processing available indices: {selected_frame_indices}")
+    else:
+        # Use existing logic with stride and reverse
+        if args.reverse:
+            ordered_frame_indices = list(reversed(ordered_frame_indices))
+        selected_frame_indices = ordered_frame_indices[:: args.stride]
     scene_vis_root = Path(args.output_image_dir) / scene_id if args.output_image_dir else None
     if scene_vis_root:
         scene_vis_root.mkdir(parents=True, exist_ok=True)
@@ -1369,14 +1413,12 @@ def build_scene_frame_summary(
             print(f"[ERROR] scene={scene_id} frame={frame_index}: {exc}")
         summary_frames.append(frame_summary)
 
-    return {
+    summary = {
         "scene_id": scene_id,
         "annotation_json": str(scene_json_path),
         "image_count": len(scene_image_refs),
         "requested_frame_count": len(ordered_frame_indices),
         "processed_frame_count": len(selected_frame_indices),
-        "stride": args.stride,
-        "reverse": args.reverse,
         "usage": sum_usage_dicts([frame.get("usage") for frame in summary_frames]),
         "frames": summary_frames,
         "failures": [
@@ -1384,6 +1426,18 @@ def build_scene_frame_summary(
             for frame_index, error in failures
         ],
     }
+    
+    # Add selection method info
+    frame_indices = getattr(args, "frame_indices", None)
+    if frame_indices:
+        summary["frame_indices"] = parse_frame_indices(frame_indices)
+        summary["selection_method"] = "frame_indices"
+    else:
+        summary["stride"] = args.stride
+        summary["reverse"] = args.reverse
+        summary["selection_method"] = "stride_reverse"
+    
+    return summary
 
 
 def process_scene_jsons(client: OpenAI, args: argparse.Namespace) -> None:
@@ -1464,7 +1518,7 @@ def main() -> None:
     args = parse_args()
     api_key = require_api_key()
     client = build_client(api_key, args.region, args.base_url)
-    if args.scene_json or args.scene_json_dir or args.scene_id or args.scene_ids:
+    if args.scene_json or args.scene_json_dir or args.scene_id or getattr(args, 'scene_ids', None) or getattr(args, 'frame_indices', None):
         process_scene_jsons(client, args)
         return
     if args.image_dir:
