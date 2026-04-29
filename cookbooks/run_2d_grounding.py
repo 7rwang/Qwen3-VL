@@ -627,6 +627,19 @@ def image_paths_in_dir(directory: Path) -> list[Path]:
     )
 
 
+def memory_key_aliases(prompt_key: str) -> list[str]:
+    aliases = [
+        prompt_key,
+        prompt_key.replace("_", "-"),
+        prompt_key.replace("-", "_"),
+    ]
+    special_aliases = {
+        "thermostatic_radiator_valve": ["radiator-thermostat", "radiator_thermostat"],
+    }
+    aliases.extend(special_aliases.get(prompt_key, []))
+    return [alias for idx, alias in enumerate(aliases) if alias and alias not in aliases[:idx]]
+
+
 def resolve_prompt_memory_refs(
     memory_root: str | None,
     prompt_key: str,
@@ -642,44 +655,60 @@ def resolve_prompt_memory_refs(
     if frame_index is not None:
         frame_names.extend([str(frame_index), f"{frame_index:04d}", f"{frame_index:06d}"])
     frame_names = [name for idx, name in enumerate(frame_names) if name and name not in frame_names[:idx]]
+    prompt_key_aliases = memory_key_aliases(prompt_key)
 
     candidate_files: list[Path] = []
-    candidate_dirs: list[Path] = [
-        root / prompt_key,
-        root / "memory" / prompt_key,
-        root / "memories" / prompt_key,
-    ]
-    if scene_id:
+    candidate_dirs: list[Path] = []
+    for key_alias in prompt_key_aliases:
         candidate_dirs.extend(
             [
-                root / scene_id / prompt_key,
-                root / scene_id / "memory" / prompt_key,
-                root / scene_id / "memories" / prompt_key,
-                root / prompt_key / scene_id,
+                root / key_alias,
+                root / "memory" / key_alias,
+                root / "memories" / key_alias,
             ]
         )
-    for suffix in IMAGE_SUFFIXES:
-        candidate_files.append(root / f"{prompt_key}{suffix}")
-    for name in frame_names:
+    if scene_id:
+        for key_alias in prompt_key_aliases:
+            candidate_dirs.extend(
+                [
+                    root / scene_id / key_alias,
+                    root / scene_id / "memory" / key_alias,
+                    root / scene_id / "memories" / key_alias,
+                    root / key_alias / scene_id,
+                ]
+            )
+    for key_alias in prompt_key_aliases:
         for suffix in IMAGE_SUFFIXES:
             candidate_files.extend(
                 [
-                    root / prompt_key / f"{name}{suffix}",
-                    root / "memory" / prompt_key / f"{name}{suffix}",
-                    root / "memories" / prompt_key / f"{name}{suffix}",
-                    root / f"{prompt_key}_{name}{suffix}",
+                    root / f"{key_alias}{suffix}",
+                    root / f"{key_alias}_mosaic{suffix}",
+                    root / f"{key_alias}-mosaic{suffix}",
                 ]
             )
-            if scene_id:
+    for name in frame_names:
+        for suffix in IMAGE_SUFFIXES:
+            for key_alias in prompt_key_aliases:
                 candidate_files.extend(
                     [
-                        root / scene_id / prompt_key / f"{name}{suffix}",
-                        root / scene_id / "memory" / prompt_key / f"{name}{suffix}",
-                        root / scene_id / "memories" / prompt_key / f"{name}{suffix}",
-                        root / prompt_key / scene_id / f"{name}{suffix}",
-                        root / f"{scene_id}_{prompt_key}_{name}{suffix}",
+                        root / key_alias / f"{name}{suffix}",
+                        root / key_alias / f"{name}_mosaic{suffix}",
+                        root / "memory" / key_alias / f"{name}{suffix}",
+                        root / "memories" / key_alias / f"{name}{suffix}",
+                        root / f"{key_alias}_{name}{suffix}",
                     ]
                 )
+                if scene_id:
+                    candidate_files.extend(
+                        [
+                            root / scene_id / key_alias / f"{name}{suffix}",
+                            root / scene_id / key_alias / f"{name}_mosaic{suffix}",
+                            root / scene_id / "memory" / key_alias / f"{name}{suffix}",
+                            root / scene_id / "memories" / key_alias / f"{name}{suffix}",
+                            root / key_alias / scene_id / f"{name}{suffix}",
+                            root / f"{scene_id}_{key_alias}_{name}{suffix}",
+                        ]
+                    )
     return unique_image_paths(candidate_files + [path for directory in candidate_dirs for path in image_paths_in_dir(directory)])
 
 
