@@ -54,6 +54,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-dir", help="Directory containing local images to process in batch.")
     parser.add_argument("--data-root", help="Dataset root for scene-based processing.")
     parser.add_argument("--mask-root", help="Optional root containing scene/frame mask folders for mask-guided refinement.")
+    parser.add_argument("--memory-image", help="Optional local image path or http(s) URL to pass as an additional reference image for every inference.")
+    parser.add_argument("--memory-root", help="Optional directory containing prompt-key memory images, e.g. memory_root/door_handle/*.png.")
+    parser.add_argument("--require-memory", action="store_true", help="Fail when --memory-root is set but no memory image can be resolved.")
     parser.add_argument("--scene-json", help="Path to one scene annotation JSON, e.g. 421254.json.")
     parser.add_argument("--scene-json-dir", help="Directory containing many scene annotation JSON files.")
     parser.add_argument("--scene-id", help="Optional scene id to process one scene from --scene-json-dir.")
@@ -61,6 +64,8 @@ def parse_args() -> argparse.Namespace:
         "--scene-ids",
         help="Optional comma-separated scene ids to process from --scene-json-dir, e.g. 421254,421255.",
     )
+    parser.add_argument("--frame-indices", help="Optional comma-separated frame indices to process, e.g. 0,5,10. Overrides --stride and --reverse.")
+    parser.add_argument("--append-mode", action="store_true", help="Append new frame results to existing JSON files instead of overwriting. Only works with --frame-indices.")
     parser.add_argument("--prompt", help="Grounding prompt to send to the model.")
     parser.add_argument("--prompt-file", help="Optional text file containing one prompt per non-empty line.")
     parser.add_argument("--model", default="Qwen/Qwen3-VL-32B-Instruct", help="HF model id or local path.")
@@ -105,8 +110,36 @@ def infer_hf_image_bytes(
     min_pixels: int,
     max_pixels: int,
     mime_type: str = "image/jpeg",
+    memory_images: list[tuple[bytes, str, str]] | None = None,
 ) -> dict[str, Any]:
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": "Current image to ground:"},
+        {"type": "image", "image": image},
+    ]
+    if memory_images:
+        user_content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": (
+                        "The following memory images are references selected for this prompt. "
+                        "They may contain stitched ground-truth projections from nearby or previous frames. "
+                        "Use them only as visual reference for the requested object category; output boxes "
+                        "must be for the current image, not for the memory images."
+                    ),
+                },
+            ]
+        )
+        for memory_index, (memory_image_bytes, _memory_mime_type, memory_label) in enumerate(memory_images, start=1):
+            memory_image = Image.open(BytesIO(memory_image_bytes)).convert("RGB")
+            user_content.extend(
+                [
+                    {"type": "text", "text": f"Reference memory {memory_index}: {memory_label}"},
+                    {"type": "image", "image": memory_image},
+                ]
+            )
+    user_content.append({"type": "text", "text": prompt})
     messages = [
         {
             "role": "system",
@@ -124,10 +157,7 @@ def infer_hf_image_bytes(
         },
         {
             "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": prompt},
-            ],
+            "content": user_content,
         },
     ]
     inputs = client.processor.apply_chat_template(
@@ -167,14 +197,12 @@ def infer_hf(
     model: str,
     min_pixels: int,
     max_pixels: int,
+    memory_refs: list[str] | None = None,
 ) -> dict[str, Any]:
-    mime_type = "image/jpeg"
-    if not api_impl.is_url(image_ref):
-        suffix = Path(image_ref).suffix.lower()
-        if suffix == ".png":
-            mime_type = "image/png"
-        elif suffix == ".webp":
-            mime_type = "image/webp"
+    memory_images = [
+        (api_impl.load_image_bytes(memory_ref), api_impl.mime_type_for_image_ref(memory_ref), memory_ref)
+        for memory_ref in (memory_refs or [])
+    ]
     return infer_hf_image_bytes(
         client=client,
         image_bytes=api_impl.load_image_bytes(image_ref),
@@ -182,7 +210,8 @@ def infer_hf(
         model=model,
         min_pixels=min_pixels,
         max_pixels=max_pixels,
-        mime_type=mime_type,
+        mime_type=api_impl.mime_type_for_image_ref(image_ref),
+        memory_images=memory_images,
     )
 
 
@@ -205,7 +234,7 @@ def main() -> None:
         return
 
     prompts = api_impl.load_prompts(args.prompt, args.prompt_file)
-    if len(prompts) == 1:
+    if len(prompts) == 1 and not args.memory_root:
         api_impl.process_one(
             client=client,
             image_ref=args.image,
@@ -216,6 +245,7 @@ def main() -> None:
             mode=args.mode,
             output_json=args.output_json,
             output_image=args.output_image,
+            memory_refs=[args.memory_image] if args.memory_image else None,
         )
         return
 
@@ -229,6 +259,9 @@ def main() -> None:
         mode=args.mode,
         output_json=args.output_json,
         output_image=args.output_image,
+        memory_refs=[args.memory_image] if args.memory_image else None,
+        memory_root=args.memory_root,
+        require_memory=args.require_memory,
     )
 
 

@@ -60,6 +60,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-dir", help="Directory containing local images to process in batch.")
     parser.add_argument("--data-root", help="Dataset root for scene-based processing.")
     parser.add_argument("--mask-root", help="Optional root containing scene/frame mask folders for mask-guided refinement.")
+    parser.add_argument(
+        "--memory-image",
+        help="Optional local image path or http(s) URL to pass as an additional reference image for every inference.",
+    )
+    parser.add_argument(
+        "--memory-root",
+        help=(
+            "Optional directory containing prompt-key memory images, e.g. memory_root/door_handle/*.png."
+        ),
+    )
+    parser.add_argument(
+        "--require-memory",
+        action="store_true",
+        help="Fail when --memory-root is set but no memory image can be resolved for a processed image/frame.",
+    )
     parser.add_argument("--scene-json", help="Path to one scene annotation JSON, e.g. 421254.json.")
     parser.add_argument("--scene-json-dir", help="Directory containing many scene annotation JSON files.")
     parser.add_argument("--scene-id", help="Optional scene id to process one scene from --scene-json-dir.")
@@ -176,6 +191,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("Scene-json mode requires --data-root.")
     if args.image_dir and args.output_image:
         raise SystemExit("--output-image is only valid with --image.")
+    if args.memory_image and not is_url(args.memory_image):
+        memory_image = Path(args.memory_image).expanduser()
+        if not memory_image.exists() or not memory_image.is_file():
+            raise SystemExit(f"--memory-image does not exist or is not a file: {args.memory_image}")
+    if args.memory_root:
+        memory_root = Path(args.memory_root).expanduser()
+        if not memory_root.exists() or not memory_root.is_dir():
+            raise SystemExit(f"--memory-root does not exist or is not a directory: {args.memory_root}")
     if args.stride < 1:
         raise SystemExit("--stride must be >= 1.")
 
@@ -204,6 +227,16 @@ def load_pil_image(image_ref: str) -> Image.Image:
 
 def is_url(image_ref: str) -> bool:
     return image_ref.startswith(("http://", "https://"))
+
+
+def mime_type_for_image_ref(image_ref: str) -> str:
+    if not is_url(image_ref):
+        suffix = Path(image_ref).suffix.lower()
+        if suffix == ".png":
+            return "image/png"
+        if suffix == ".webp":
+            return "image/webp"
+    return "image/jpeg"
 
 
 def iter_image_refs(image_dir: str, glob_patterns: str) -> list[str]:
@@ -572,6 +605,84 @@ def resolve_scene_image_refs(data_root: str, scene_id: str) -> list[str]:
     return [str(path.resolve()) for path in image_paths]
 
 
+def unique_image_paths(paths: list[Path]) -> list[str]:
+    seen: set[Path] = set()
+    result: list[str] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists() and resolved.is_file() and resolved.suffix.lower() in IMAGE_SUFFIXES:
+            result.append(str(resolved))
+    return result
+
+
+def image_paths_in_dir(directory: Path) -> list[Path]:
+    if not directory.exists() or not directory.is_dir():
+        return []
+    return sorted(
+        path for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+    )
+
+
+def resolve_prompt_memory_refs(
+    memory_root: str | None,
+    prompt_key: str,
+    image_ref: str,
+    scene_id: str | None = None,
+    frame_index: int | None = None,
+) -> list[str]:
+    if not memory_root:
+        return []
+    root = Path(memory_root).expanduser().resolve()
+    image_stem = "" if is_url(image_ref) else Path(image_ref).stem
+    frame_names = [image_stem] if image_stem else []
+    if frame_index is not None:
+        frame_names.extend([str(frame_index), f"{frame_index:04d}", f"{frame_index:06d}"])
+    frame_names = [name for idx, name in enumerate(frame_names) if name and name not in frame_names[:idx]]
+
+    candidate_files: list[Path] = []
+    candidate_dirs: list[Path] = [
+        root / prompt_key,
+        root / "memory" / prompt_key,
+        root / "memories" / prompt_key,
+    ]
+    if scene_id:
+        candidate_dirs.extend(
+            [
+                root / scene_id / prompt_key,
+                root / scene_id / "memory" / prompt_key,
+                root / scene_id / "memories" / prompt_key,
+                root / prompt_key / scene_id,
+            ]
+        )
+    for suffix in IMAGE_SUFFIXES:
+        candidate_files.append(root / f"{prompt_key}{suffix}")
+    for name in frame_names:
+        for suffix in IMAGE_SUFFIXES:
+            candidate_files.extend(
+                [
+                    root / prompt_key / f"{name}{suffix}",
+                    root / "memory" / prompt_key / f"{name}{suffix}",
+                    root / "memories" / prompt_key / f"{name}{suffix}",
+                    root / f"{prompt_key}_{name}{suffix}",
+                ]
+            )
+            if scene_id:
+                candidate_files.extend(
+                    [
+                        root / scene_id / prompt_key / f"{name}{suffix}",
+                        root / scene_id / "memory" / prompt_key / f"{name}{suffix}",
+                        root / scene_id / "memories" / prompt_key / f"{name}{suffix}",
+                        root / prompt_key / scene_id / f"{name}{suffix}",
+                        root / f"{scene_id}_{prompt_key}_{name}{suffix}",
+                    ]
+                )
+    return unique_image_paths(candidate_files + [path for directory in candidate_dirs for path in image_paths_in_dir(directory)])
+
+
 def normalize_token(text: str) -> str:
     lowered = text.strip().lower().replace("_", " ")
     lowered = re.sub(r"\s+", " ", lowered)
@@ -741,10 +852,48 @@ def infer_image_bytes(
     min_pixels: int,
     max_pixels: int,
     mime_type: str = "image/jpeg",
+    memory_images: list[tuple[bytes, str, str]] | None = None,
 ) -> dict[str, Any]:
     import base64
 
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": "Current image to ground:"},
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime_type};base64,{base64_image}"},
+            "min_pixels": min_pixels,
+            "max_pixels": max_pixels,
+        },
+    ]
+    if memory_images:
+        user_content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": (
+                        "The following memory images are references selected for this prompt. "
+                        "They may contain stitched ground-truth projections from nearby or previous frames. "
+                        "Use them only as visual reference for the requested object category; output boxes "
+                        "must be for the current image, not for the memory images."
+                    ),
+                },
+            ]
+        )
+        for memory_index, (memory_image_bytes, memory_mime_type, memory_label) in enumerate(memory_images, start=1):
+            base64_memory_image = base64.b64encode(memory_image_bytes).decode("utf-8")
+            user_content.extend(
+                [
+                    {"type": "text", "text": f"Reference memory {memory_index}: {memory_label}"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{memory_mime_type};base64,{base64_memory_image}"},
+                        "min_pixels": min_pixels,
+                        "max_pixels": max_pixels,
+                    },
+                ]
+            )
+    user_content.append({"type": "text", "text": prompt})
     messages = [
         {
             "role": "system",
@@ -757,15 +906,7 @@ def infer_image_bytes(
         },
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{base64_image}"},
-                    "min_pixels": min_pixels,
-                    "max_pixels": max_pixels,
-                },
-                {"type": "text", "text": prompt},
-            ],
+            "content": user_content,
         }
     ]
     completion = client.chat.completions.create(model=model, messages=messages)
@@ -782,14 +923,12 @@ def infer(
     model: str,
     min_pixels: int,
     max_pixels: int,
+    memory_refs: list[str] | None = None,
 ) -> dict[str, Any]:
-    mime_type = "image/jpeg"
-    if not is_url(image_ref):
-        suffix = Path(image_ref).suffix.lower()
-        if suffix == ".png":
-            mime_type = "image/png"
-        elif suffix == ".webp":
-            mime_type = "image/webp"
+    memory_images = [
+        (load_image_bytes(memory_ref), mime_type_for_image_ref(memory_ref), memory_ref)
+        for memory_ref in (memory_refs or [])
+    ]
     return infer_image_bytes(
         client=client,
         image_bytes=load_image_bytes(image_ref),
@@ -797,7 +936,8 @@ def infer(
         model=model,
         min_pixels=min_pixels,
         max_pixels=max_pixels,
-        mime_type=mime_type,
+        mime_type=mime_type_for_image_ref(image_ref),
+        memory_images=memory_images,
     )
 
 
@@ -942,6 +1082,7 @@ def process_one(
     mode: str,
     output_json: str | None = None,
     output_image: str | None = None,
+    memory_refs: list[str] | None = None,
 ) -> str:
     infer_result = infer(
         client,
@@ -950,6 +1091,7 @@ def process_one(
         model,
         min_pixels,
         max_pixels,
+        memory_refs=memory_refs,
     )
     response_text = infer_result["response_text"]
     usage = infer_result.get("usage")
@@ -962,6 +1104,7 @@ def process_one(
         ensure_parent_dir(output_json)
         payload = {
             "image": image_ref,
+            "memory_images": memory_refs or [],
             "model": model,
             "prompt": prompt,
             "response": response_text,
@@ -1013,12 +1156,32 @@ def process_one_with_prompts(
     mode: str,
     output_json: str | None = None,
     output_image: str | None = None,
+    memory_refs: list[str] | None = None,
+    memory_root: str | None = None,
+    require_memory: bool = False,
+    scene_id: str | None = None,
+    frame_index: int | None = None,
 ) -> dict[str, Any]:
     print(f"=== {image_ref} ===")
+    base_memory_refs = memory_refs or []
     all_results: list[dict[str, Any]] = []
     for idx, prompt_item in enumerate(prompts, start=1):
         prompt = prompt_item["text"]
+        prompt_memory_refs = base_memory_refs + resolve_prompt_memory_refs(
+            memory_root,
+            prompt_item["key"],
+            image_ref,
+            scene_id=scene_id,
+            frame_index=frame_index,
+        )
+        prompt_memory_refs = list(dict.fromkeys(prompt_memory_refs))
+        if memory_root and require_memory and not prompt_memory_refs:
+            raise ValueError(
+                f"No memory images found under {memory_root} for prompt_key={prompt_item['key']}"
+            )
         print(f"--- prompt {idx}/{len(prompts)} ---")
+        if prompt_memory_refs:
+            print(f"memory[{prompt_item['key']}]: {json.dumps(prompt_memory_refs, ensure_ascii=False)}")
         infer_result = infer(
             client,
             image_ref,
@@ -1026,6 +1189,7 @@ def process_one_with_prompts(
             model,
             min_pixels,
             max_pixels,
+            memory_refs=prompt_memory_refs,
         )
         response_text = infer_result["response_text"]
         usage = infer_result.get("usage")
@@ -1037,6 +1201,7 @@ def process_one_with_prompts(
                 "prompt_index": idx - 1,
                 "prompt_key": prompt_item["key"],
                 "prompt": prompt,
+                "memory_images": prompt_memory_refs,
                 "response": response_text,
                 "usage": usage,
             }
@@ -1044,6 +1209,7 @@ def process_one_with_prompts(
 
     payload = {
         "image": image_ref,
+        "memory_images": sorted({memory_ref for result in all_results for memory_ref in result["memory_images"]}),
         "model": model,
         "usage": sum_usage_dicts([result.get("usage") for result in all_results]),
         "results": all_results,
@@ -1115,6 +1281,9 @@ def process_batch(client: OpenAI, args: argparse.Namespace) -> None:
                 max_pixels=args.max_pixels,
                 mode=args.mode,
                 output_image=output_image,
+                memory_refs=[args.memory_image] if args.memory_image else None,
+                memory_root=args.memory_root,
+                require_memory=args.require_memory,
             )
             objects: dict[str, list[dict[str, Any]]] = {}
             for result in payload["results"]:
@@ -1126,6 +1295,7 @@ def process_batch(client: OpenAI, args: argparse.Namespace) -> None:
                 {
                     "frame_index": frame_index,
                     "image": image_ref,
+                    "memory_images": payload.get("memory_images", []),
                     "processed": True,
                     "usage": payload.get("usage"),
                     "objects": objects,
@@ -1431,6 +1601,23 @@ def build_scene_frame_summary(
                 buffer = BytesIO()
                 annotated_image.save(buffer, format="PNG")
                 prompt = build_mask_refine_prompt(candidates)
+                memory_refs = [args.memory_image] if args.memory_image else []
+                for prompt_key in sorted({candidate["prompt_key"] for candidate in candidates}):
+                    prompt_memory_refs = resolve_prompt_memory_refs(
+                        args.memory_root,
+                        prompt_key,
+                        image_ref,
+                        scene_id=scene_id,
+                        frame_index=frame_index,
+                    )
+                    if args.memory_root and args.require_memory and not prompt_memory_refs:
+                        raise ValueError(
+                            f"No memory images found under {args.memory_root} for prompt_key={prompt_key}"
+                        )
+                    memory_refs.extend(prompt_memory_refs)
+                memory_refs = list(dict.fromkeys(memory_refs))
+                if memory_refs:
+                    frame_summary["memory_images"] = memory_refs
                 infer_result = infer_image_bytes(
                     client=client,
                     image_bytes=buffer.getvalue(),
@@ -1438,6 +1625,11 @@ def build_scene_frame_summary(
                     model=args.model,
                     min_pixels=args.min_pixels,
                     max_pixels=args.max_pixels,
+                    mime_type="image/png",
+                    memory_images=[
+                        (load_image_bytes(memory_ref), mime_type_for_image_ref(memory_ref), memory_ref)
+                        for memory_ref in memory_refs
+                    ],
                 )
                 response_text = infer_result["response_text"]
                 usage = infer_result.get("usage")
@@ -1475,7 +1667,13 @@ def build_scene_frame_summary(
                     max_pixels=args.max_pixels,
                     mode=args.mode,
                     output_image=output_image,
+                    memory_refs=[args.memory_image] if args.memory_image else None,
+                    memory_root=args.memory_root,
+                    require_memory=args.require_memory,
+                    scene_id=scene_id,
+                    frame_index=frame_index,
                 )
+                frame_summary["memory_images"] = payload.get("memory_images", [])
                 objects: dict[str, list[dict[str, Any]]] = {}
                 for result in payload["results"]:
                     items = try_parse_detection_items(result["response"])
@@ -1621,7 +1819,7 @@ def main() -> None:
         return
 
     prompts = load_prompts(args.prompt, args.prompt_file)
-    if len(prompts) == 1:
+    if len(prompts) == 1 and not args.memory_root:
         process_one(
             client=client,
             image_ref=args.image,
@@ -1632,6 +1830,7 @@ def main() -> None:
             mode=args.mode,
             output_json=args.output_json,
             output_image=args.output_image,
+            memory_refs=[args.memory_image] if args.memory_image else None,
         )
         return
 
@@ -1645,6 +1844,9 @@ def main() -> None:
         mode=args.mode,
         output_json=args.output_json,
         output_image=args.output_image,
+        memory_refs=[args.memory_image] if args.memory_image else None,
+        memory_root=args.memory_root,
+        require_memory=args.require_memory,
     )
 
 
