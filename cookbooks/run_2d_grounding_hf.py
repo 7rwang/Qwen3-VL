@@ -125,6 +125,10 @@ def infer_hf_image_bytes(
                     "text": (
                         "The following memory images are references selected for this prompt. "
                         "They may contain stitched ground-truth projections from nearby or previous frames. "
+                        "In each memory image, the red semi-transparent mask marks the ground-truth annotation "
+                        "for the object category requested by this prompt. "
+                        "Use these masks to understand the intended annotation granularity, including which "
+                        "subpart should be boxed and how tight the ground-truth boundary should be. "
                         "Use them only as visual reference for the requested object category; output boxes "
                         "must be for the current image, not for the memory images."
                     ),
